@@ -18,7 +18,7 @@ type topModel struct {
 	now       time.Time
 
 	repoInput    string
-	repos        []string
+	repos        []core.CodeRepo
 	selectedRepo int
 	projectFocus projectFocus
 	settings     settings
@@ -29,7 +29,9 @@ type topModel struct {
 	svc    core.SvcImpl
 	dbRepo core.DbRepo
 
-	isCloning bool
+	isCloning      bool
+	isLoadingRepo  bool
+	isDeletingRepo bool
 }
 
 type tickMsg time.Time
@@ -42,7 +44,7 @@ func newModel(svc core.SvcImpl, dbRepo core.DbRepo) topModel {
 			"Logs",
 			"Settings",
 		},
-		repos:        []string{},
+		repos:        []core.CodeRepo{},
 		projectFocus: focusInput,
 		now:          time.Now(),
 		settings:     newSettingModel(),
@@ -59,11 +61,34 @@ func Run(svc core.SvcImpl, dbRepo core.DbRepo) error {
 
 func (m topModel) Init() tea.Cmd {
 	// first call to fetch the project for landing
-	return tickCmd()
+	loadRepoCmd := func() tea.Msg {
+		repos, err := m.dbRepo.ListCodeRepo()
+		return loadRepoMsg{
+			repos: repos,
+			err:   err,
+		}
+	}
+	return tea.Batch(tickCmd(), loadRepoCmd)
 }
 
 func (m topModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case deleteRepoMsg:
+		m.isDeletingRepo = false
+		if msg.err != nil {
+			m.statusMessage = "Failed to delete repo: " + msg.err.Error()
+			m.statusIsError = true
+			return m, nil
+		}
+		deleted := m.repos[m.selectedRepo]
+		m.repos = append(m.repos[:m.selectedRepo], m.repos[m.selectedRepo+1:]...)
+		if m.selectedRepo >= len(m.repos) && m.selectedRepo > 0 {
+			m.selectedRepo--
+		}
+		m.statusMessage = "Deleted: " + deleted.Repo
+		m.statusIsError = false
+		return m, nil
+
 	case addRepoMsg:
 		m.isCloning = false
 		if msg.err != nil {
@@ -72,11 +97,26 @@ func (m topModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		m.repos = append(m.repos, msg.raw)
+		m.repos = append(m.repos, msg.repo)
 		m.selectedRepo = len(m.repos) - 1
 		m.repoInput = ""
 		m.statusMessage = "Repository added."
 		m.statusIsError = false
+		return m, nil
+
+	case loadRepoMsg:
+		m.isLoadingRepo = false
+		if msg.err != nil {
+			m.statusMessage = "Failed to list repos: " + msg.err.Error()
+			m.statusIsError = true
+			return m, nil
+		}
+
+		m.repos = msg.repos
+		m.selectedRepo = 0
+		m.statusIsError = false
+		m.statusMessage = "Repos loaded"
+
 		return m, nil
 	case tea.KeyMsg:
 		key := msg.String()
@@ -136,7 +176,7 @@ func (m topModel) updateProjects(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		if m.projectFocus == focusInput {
-			m, cmd = m.addRepoFromInput()
+			m, cmd = m.addRepo()
 		}
 		return m, cmd
 	case "backspace":
@@ -157,9 +197,9 @@ func (m topModel) updateProjects(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "d":
 		if m.projectFocus == focusRepoList {
-			m = m.deleteSelectedRepo()
+			m, cmd = m.deleteRepo()
 		}
-		return m, nil
+		return m, cmd
 	case "esc":
 		if m.projectFocus == focusInput {
 			m.repoInput = ""
@@ -176,14 +216,11 @@ func (m topModel) updateProjects(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-type addRepoMsg struct {
-	raw string
-	err error
-}
-
-func (m topModel) addRepoFromInput() (topModel, tea.Cmd) {
+func (m topModel) addRepo() (topModel, tea.Cmd) {
 	if m.isCloning {
 		// can't do anything?
+		m.statusMessage = "Repo cloning in progress"
+		m.statusIsError = false
 		return m, nil
 	}
 	raw := strings.TrimSpace(m.repoInput)
@@ -198,15 +235,15 @@ func (m topModel) addRepoFromInput() (topModel, tea.Cmd) {
 		return m, nil
 	}
 
+	repoName := core.ParseGithubUrl(raw)
 	for _, existing := range m.repos {
-		if strings.EqualFold(existing, raw) {
+		if strings.EqualFold(existing.Repo, raw) {
 			m.statusMessage = "Repo already exists in the list."
 			m.statusIsError = true
 			return m, nil
 		}
 	}
 
-	repoName := core.ParseGithubUrl(raw)
 	if repoName == "" {
 		m.statusMessage = "Only GitHub repo URLs are supported for now."
 		m.statusIsError = true
@@ -216,11 +253,15 @@ func (m topModel) addRepoFromInput() (topModel, tea.Cmd) {
 	// start clone
 	m.isCloning = true
 	m.statusMessage = "Cloning repo .."
+	m.statusIsError = false
 
 	cmd := func() tea.Msg {
 		err := m.svc.CloneRepo(repoName, raw)
 		return addRepoMsg{
-			raw: raw,
+			repo: core.CodeRepo{
+				Repo: repoName,
+				URL:  raw,
+			},
 			err: err,
 		}
 	}
@@ -228,21 +269,21 @@ func (m topModel) addRepoFromInput() (topModel, tea.Cmd) {
 	return m, cmd
 }
 
-func (m topModel) deleteSelectedRepo() topModel {
+func (m topModel) deleteRepo() (topModel, tea.Cmd) {
 	if len(m.repos) == 0 {
 		m.statusMessage = "No repository selected."
 		m.statusIsError = true
-		return m
+		return m, nil
 	}
 
-	deleted := m.repos[m.selectedRepo]
-	m.repos = append(m.repos[:m.selectedRepo], m.repos[m.selectedRepo+1:]...)
-	if m.selectedRepo >= len(m.repos) && m.selectedRepo > 0 {
-		m.selectedRepo--
+	deleteCmd := func() tea.Msg {
+		err := m.dbRepo.DeleteRepo(m.repos[m.selectedRepo].Repo)
+		return deleteRepoMsg{err: err}
 	}
-	m.statusMessage = "Deleted: " + deleted
+	m.statusMessage = "Delete repo.."
 	m.statusIsError = false
-	return m
+
+	return m, deleteCmd
 }
 
 func tickCmd() tea.Cmd {
@@ -309,11 +350,11 @@ func (m topModel) renderTabs() string {
 func (m topModel) renderBody() string {
 	switch m.tabs[m.activeTab] {
 	case "Projects":
-		return m.renderProjectsLanding()
+		return m.renderProjects()
 	case "Branches":
 		return "Branches\n\nThis section will show branch status and recent runs."
-	case "Logs":
-		return "Logs\n\nThis section will stream live job output."
+	//case "Logs":
+	//	return "Logs\n\nThis section will stream live job output."
 	case "Settings":
 		return m.settings.View()
 	default:
@@ -321,7 +362,7 @@ func (m topModel) renderBody() string {
 	}
 }
 
-func (m topModel) renderProjectsLanding() string {
+func (m topModel) renderProjects() string {
 	logo := logoStyle.Render(strings.Join([]string{
 		" _   _  ____ ___ ",
 		"| \\ | |/ ___|_ _|",
@@ -330,15 +371,11 @@ func (m topModel) renderProjectsLanding() string {
 		"|_| \\_|\\____|___|",
 	}, "\n"))
 
-	inputCard := m.renderRepoInputCard()
-	repoListCard := m.renderRepoListCard()
+	inputCard := m.renderRepoInput()
+	repoListCard := m.renderRepoList()
 
 	var sections string
-	if m.width < 110 {
-		sections = lipgloss.JoinVertical(lipgloss.Left, inputCard, repoListCard)
-	} else {
-		sections = lipgloss.JoinHorizontal(lipgloss.Top, inputCard, repoListCard)
-	}
+	sections = lipgloss.JoinVertical(lipgloss.Left, inputCard, repoListCard)
 
 	return strings.Join([]string{
 		logo,
@@ -347,7 +384,7 @@ func (m topModel) renderProjectsLanding() string {
 	}, "\n")
 }
 
-func (m topModel) renderRepoInputCard() string {
+func (m topModel) renderRepoInput() string {
 	var b strings.Builder
 	b.WriteString(sectionTitleStyle.Render("1) Add Repo"))
 	b.WriteString("\n")
@@ -378,14 +415,10 @@ func (m topModel) renderRepoInputCard() string {
 		style = style.BorderForeground(lipgloss.Color("45"))
 	}
 
-	width := 62
-	if m.width < 110 {
-		width = max(44, m.width-8)
-	}
-	return style.Width(width).Render(b.String())
+	return style.Render(b.String())
 }
 
-func (m topModel) renderRepoListCard() string {
+func (m topModel) renderRepoList() string {
 	var b strings.Builder
 	b.WriteString(sectionTitleStyle.Render("2) Existing Repos"))
 	b.WriteString("\n")
@@ -394,7 +427,7 @@ func (m topModel) renderRepoListCard() string {
 		b.WriteString(mutedStyle.Render("No repos yet."))
 	} else {
 		for i, repo := range m.repos {
-			line := fmt.Sprintf("  %d. %s", i+1, repo)
+			line := fmt.Sprintf("  %d. %s\n%s", i+1, repo.Repo, repo.URL)
 			if i == m.selectedRepo {
 				b.WriteString(selectedItemStyle.Render("> " + strings.TrimSpace(line)))
 			} else {
@@ -414,18 +447,7 @@ func (m topModel) renderRepoListCard() string {
 		style = style.BorderForeground(lipgloss.Color("45"))
 	}
 
-	width := 42
-	if m.width < 110 {
-		width = max(44, m.width-8)
-	}
-	return style.Width(width).Render(b.String())
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
+	return style.Render(b.String())
 }
 
 func isRepoURL(raw string) bool {
