@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"dexianta/nci/core"
 	"fmt"
 	"strings"
 	"time"
@@ -24,11 +25,14 @@ type topModel struct {
 
 	statusMessage string
 	statusIsError bool
+
+	svc    core.SvcImpl
+	dbRepo core.DbRepo
 }
 
 type tickMsg time.Time
 
-func newModel() topModel {
+func newModel(svc core.SvcImpl, dbRepo core.DbRepo) topModel {
 	return topModel{
 		tabs: []string{
 			"Projects",
@@ -40,16 +44,19 @@ func newModel() topModel {
 		projectFocus: focusInput,
 		now:          time.Now(),
 		settings:     newSettingModel(),
+		dbRepo:       dbRepo,
+		svc:          svc,
 	}
 }
 
-func Run() error {
-	p := tea.NewProgram(newModel(), tea.WithAltScreen())
+func Run(svc core.SvcImpl, dbRepo core.DbRepo) error {
+	p := tea.NewProgram(newModel(svc, dbRepo), tea.WithAltScreen())
 	_, err := p.Run()
 	return err
 }
 
 func (m topModel) Init() tea.Cmd {
+	// first call to fetch the project for landing
 	return tickCmd()
 }
 
@@ -155,12 +162,12 @@ func (m topModel) updateProjects(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m topModel) addRepoFromInput() topModel {
 	raw := strings.TrimSpace(m.repoInput)
 	if raw == "" {
-		m.statusMessage = "Please enter a repository URL or owner/repo."
+		m.statusMessage = "Please enter a repository URL."
 		m.statusIsError = true
 		return m
 	}
-	if !strings.Contains(raw, "/") {
-		m.statusMessage = "Repo looks invalid. Use github.com/owner/repo or owner/repo."
+	if !isRepoURL(raw) {
+		m.statusMessage = "Use a full repo URL (https://... or git@...)."
 		m.statusIsError = true
 		return m
 	}
@@ -171,6 +178,20 @@ func (m topModel) addRepoFromInput() topModel {
 			m.statusIsError = true
 			return m
 		}
+	}
+
+	repoName := core.ParseGithubUrl(raw)
+	if repoName == "" {
+		m.statusMessage = "Only GitHub repo URLs are supported for now."
+		m.statusIsError = true
+		return m
+	}
+
+	err := m.svc.CloneRepo(repoName, raw)
+	if err != nil {
+		m.statusMessage = fmt.Sprintf("Failed to clone repo: %s", err.Error())
+		m.statusIsError = true
+		return m
 	}
 
 	m.repos = append(m.repos, raw)
@@ -304,12 +325,12 @@ func (m topModel) renderRepoInputCard() string {
 	var b strings.Builder
 	b.WriteString(sectionTitleStyle.Render("1) Add Repo"))
 	b.WriteString("\n")
-	b.WriteString(mutedStyle.Render("Paste GitHub URL or owner/repo, then press enter."))
+	b.WriteString(mutedStyle.Render("Paste GitHub repo URL, then press enter."))
 	b.WriteString("\n\n")
 
 	inputText := m.repoInput
 	if inputText == "" {
-		inputText = placeholderStyle.Render("https://github.com/owner/repo")
+		inputText = placeholderStyle.Render("https://github.com/owner/repo.git")
 	}
 	cursor := ""
 	if m.projectFocus == focusInput {
@@ -379,4 +400,9 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func isRepoURL(raw string) bool {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	return strings.HasPrefix(s, "https://") || strings.HasPrefix(s, "http://") || strings.HasPrefix(s, "git@")
 }
