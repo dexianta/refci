@@ -28,6 +28,8 @@ type topModel struct {
 
 	svc    core.SvcImpl
 	dbRepo core.DbRepo
+
+	isCloning bool
 }
 
 type tickMsg time.Time
@@ -62,6 +64,20 @@ func (m topModel) Init() tea.Cmd {
 
 func (m topModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case addRepoMsg:
+		m.isCloning = false
+		if msg.err != nil {
+			m.statusMessage = "Failed to clone repo: " + msg.err.Error()
+			m.statusIsError = true
+			return m, nil
+		}
+
+		m.repos = append(m.repos, msg.raw)
+		m.selectedRepo = len(m.repos) - 1
+		m.repoInput = ""
+		m.statusMessage = "Repository added."
+		m.statusIsError = false
+		return m, nil
 	case tea.KeyMsg:
 		key := msg.String()
 
@@ -109,6 +125,7 @@ const (
 )
 
 func (m topModel) updateProjects(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmd tea.Cmd
 	switch msg.String() {
 	case "tab", "shift+tab":
 		if m.projectFocus == focusInput {
@@ -119,9 +136,9 @@ func (m topModel) updateProjects(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "enter":
 		if m.projectFocus == focusInput {
-			m = m.addRepoFromInput()
+			m, cmd = m.addRepoFromInput()
 		}
-		return m, nil
+		return m, cmd
 	case "backspace":
 		if m.projectFocus == focusInput && len(m.repoInput) > 0 {
 			runes := []rune(m.repoInput)
@@ -159,24 +176,33 @@ func (m topModel) updateProjects(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m topModel) addRepoFromInput() topModel {
+type addRepoMsg struct {
+	raw string
+	err error
+}
+
+func (m topModel) addRepoFromInput() (topModel, tea.Cmd) {
+	if m.isCloning {
+		// can't do anything?
+		return m, nil
+	}
 	raw := strings.TrimSpace(m.repoInput)
 	if raw == "" {
 		m.statusMessage = "Please enter a repository URL."
 		m.statusIsError = true
-		return m
+		return m, nil
 	}
 	if !isRepoURL(raw) {
 		m.statusMessage = "Use a full repo URL (https://... or git@...)."
 		m.statusIsError = true
-		return m
+		return m, nil
 	}
 
 	for _, existing := range m.repos {
 		if strings.EqualFold(existing, raw) {
 			m.statusMessage = "Repo already exists in the list."
 			m.statusIsError = true
-			return m
+			return m, nil
 		}
 	}
 
@@ -184,22 +210,22 @@ func (m topModel) addRepoFromInput() topModel {
 	if repoName == "" {
 		m.statusMessage = "Only GitHub repo URLs are supported for now."
 		m.statusIsError = true
-		return m
+		return m, nil
 	}
 
-	err := m.svc.CloneRepo(repoName, raw)
-	if err != nil {
-		m.statusMessage = fmt.Sprintf("Failed to clone repo: %s", err.Error())
-		m.statusIsError = true
-		return m
+	// start clone
+	m.isCloning = true
+	m.statusMessage = "Cloning repo .."
+
+	cmd := func() tea.Msg {
+		err := m.svc.CloneRepo(repoName, raw)
+		return addRepoMsg{
+			raw: raw,
+			err: err,
+		}
 	}
 
-	m.repos = append(m.repos, raw)
-	m.selectedRepo = len(m.repos) - 1
-	m.repoInput = ""
-	m.statusMessage = "Repository added."
-	m.statusIsError = false
-	return m
+	return m, cmd
 }
 
 func (m topModel) deleteSelectedRepo() topModel {
