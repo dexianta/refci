@@ -61,10 +61,6 @@ func (m topModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch key {
 		case "ctrl+c":
 			return m, tea.Quit
-		case "q":
-			if !(m.activeTab == 0 && m.projectFocus == focusInput) {
-				return m, tea.Quit
-			}
 		case "left":
 			if m.activeTab > 0 {
 				m.activeTab--
@@ -164,14 +160,14 @@ func (m topModel) addRepoFromInput() topModel {
 		return m
 	}
 	if !strings.Contains(raw, "/") {
-		m.statusMessage = "Repository looks invalid. Use github.com/owner/repo or owner/repo."
+		m.statusMessage = "Repo looks invalid. Use github.com/owner/repo or owner/repo."
 		m.statusIsError = true
 		return m
 	}
 
 	for _, existing := range m.repos {
 		if strings.EqualFold(existing, raw) {
-			m.statusMessage = "Repository already exists in the list."
+			m.statusMessage = "Repo already exists in the list."
 			m.statusIsError = true
 			return m
 		}
@@ -208,13 +204,14 @@ func tickCmd() tea.Cmd {
 	})
 }
 
+var globalFooter = footerBarStyle.Render(
+	renderHint("left/right", "switch tab "),
+	renderHint("ctrl+c", "quit"),
+)
+
 func (m topModel) topHelp() string {
 	return footerBarStyle.Render(
-		renderHint("left/right", "switch tab "),
-		renderHint("tab", "switch section "),
-		renderHint("d", "delete "),
-		renderHint("enter", "add "),
-		renderHint("q", "quit"),
+		renderHint("tab", "switch section"),
 	)
 }
 
@@ -233,8 +230,10 @@ func (m topModel) View() string {
 	case 0:
 		footer = m.topHelp()
 	case 3:
+		footer = m.settings.help()
 	}
-	//footer := mutedStyle.Render("- left/right switch tab\n- tab switch section\n- enter add\n- d delete\n- q quit")
+
+	footer = lipgloss.JoinVertical(lipgloss.Top, footer, "", globalFooter)
 
 	return appStyle.Render(strings.Join([]string{
 		header,

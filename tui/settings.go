@@ -17,7 +17,7 @@ type settings struct {
 
 	globalConfForm form
 	varsForm       form
-	sshForm        form
+	sshViewer      sshViewer
 }
 
 type SSHConfig struct {
@@ -44,7 +44,12 @@ func newSettingModel() settings {
 			{key: "Poll Interval (s)", val: "3", dtype: "int"},
 			{key: "Git Timeout (s)", val: "3", dtype: "int"},
 			{key: "Log Retention Days", val: "3", dtype: "int"},
-		}, 14),
+		}, 14, false),
+		varsForm: newForm([]KV{
+			{key: "NCI_ENV", val: "dev", dtype: "string"},
+			{key: "GOFLAGS", val: "-count=1", dtype: "string"},
+		}, 20, true),
+		sshViewer: newSSHViewer(),
 	}
 }
 
@@ -53,10 +58,10 @@ func (s settings) Update(msg tea.KeyMsg) settings {
 	case true:
 		// focus on section
 		switch msg.String() {
-		case "up":
-			s.sectionIdx = modIdx(s.sectionIdx, 3, -1)
-		case "down":
-			s.sectionIdx = modIdx(s.sectionIdx, 3, 1)
+		case "up", "k":
+			s.sectionIdx = modIdx(s.sectionIdx, len(s.sectionItems), -1)
+		case "down", "j":
+			s.sectionIdx = modIdx(s.sectionIdx, len(s.sectionItems), 1)
 		case "tab":
 			s.sectionFocus = false
 		}
@@ -64,7 +69,9 @@ func (s settings) Update(msg tea.KeyMsg) settings {
 		// focus on editor
 		switch msg.String() {
 		case "tab":
-			s.sectionFocus = true
+			if !s.activeForm().IsEditing() {
+				s.sectionFocus = true
+			}
 			return s // early return
 		}
 		switch s.sectionIdx {
@@ -73,7 +80,7 @@ func (s settings) Update(msg tea.KeyMsg) settings {
 		case 1:
 			s.varsForm = s.varsForm.Update(msg)
 		case 2:
-			s.sshForm = s.sshForm.Update(msg)
+			s.sshViewer = s.sshViewer.Update(msg)
 		}
 	}
 	return s
@@ -87,7 +94,7 @@ func (s settings) View() string {
 	case 1:
 		editor = s.varsForm.View()
 	case 2:
-		editor = s.sshForm.View()
+		editor = s.sshViewer.View()
 	}
 
 	if !s.sectionFocus {
@@ -104,9 +111,27 @@ func (s settings) renderSection() string {
 		if i == s.sectionIdx {
 			text = append(text, itemSelectedStyle.Render(t))
 		} else {
-			text = append(text, itemStyle.Background(lipgloss.Color("000")).Render(t))
+			text = append(text, itemStyle.Background(lipgloss.Color("236")).Render(t))
 		}
 	}
+	list := lipgloss.NewStyle().Width(16).Render(lipgloss.JoinVertical(lipgloss.Top, text...))
+	return list
+}
 
-	return lipgloss.NewStyle().Width(16).Render(lipgloss.JoinVertical(lipgloss.Top, text...))
+func (s settings) activeForm() form {
+	switch s.sectionIdx {
+	case 0:
+		return s.globalConfForm
+	case 1:
+		return s.varsForm
+	default:
+		return s.globalConfForm
+	}
+}
+
+func (s settings) help() string {
+	return footerBarStyle.Render(
+		renderHint("up/down", "move "),
+		renderHint("tab", "switch pane"),
+	)
 }
