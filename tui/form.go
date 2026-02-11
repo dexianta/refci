@@ -28,6 +28,8 @@ type form struct {
 	mode     formMode
 	input    string
 	draftKey string
+	addKV    *KV
+	delKV    *KV
 
 	statusMessage string
 	statusIsError bool
@@ -135,9 +137,9 @@ func (f form) IsEditing() bool {
 func (f form) helpText() string {
 	if f.mode == formModeBrowse {
 		if f.editable {
-			return "[j/k]move [enter]edit [e]edit_key [a]add [d]delete"
+			return "[j/k]move [e]dit [k]ey [a]dd [d]elete"
 		}
-		return "[j/k]move [enter]edit"
+		return "[j/k]move [e]dit"
 	}
 
 	switch f.mode {
@@ -146,7 +148,7 @@ func (f form) helpText() string {
 	case formModeEditValue:
 		return "Editing value: [enter]save [esc]cancel"
 	case formModeAddKey:
-		return "Adding entry key: [enter]continue [esc]cancel"
+		return "Adding entry key: [enter]to val [esc]cancel"
 	case formModeAddValue:
 		return "Adding entry value: [enter]save [esc]cancel"
 	default:
@@ -194,6 +196,7 @@ func (f form) commitInput() form {
 		f.statusIsError = false
 		f.mode = formModeBrowse
 		f.input = ""
+		f.addKV = &f.kvs[f.idx]
 	case formModeEditKey:
 		if len(f.kvs) == 0 {
 			return f
@@ -214,6 +217,8 @@ func (f form) commitInput() form {
 		f.statusIsError = false
 		f.mode = formModeBrowse
 		f.input = ""
+		f.addKV = &f.kvs[f.idx]
+
 	case formModeAddKey:
 		key := strings.TrimSpace(f.input)
 		if key == "" {
@@ -231,6 +236,7 @@ func (f form) commitInput() form {
 		f.mode = formModeAddValue
 		f.statusMessage = ""
 		f.statusIsError = false
+
 	case formModeAddValue:
 		dtype := "string"
 		sanitized, err := sanitizeValueForType(dtype, f.input)
@@ -250,6 +256,7 @@ func (f form) commitInput() form {
 		f.statusIsError = false
 		f.input = ""
 		f.draftKey = ""
+		f.addKV = &f.kvs[f.idx]
 	}
 	return f
 }
@@ -280,6 +287,7 @@ func (f form) deleteAtSelection() form {
 	}
 	f.statusMessage = fmt.Sprintf("Deleted: %s", deleted)
 	f.statusIsError = false
+	f.delKV = &f.kvs[f.idx]
 	return f
 }
 

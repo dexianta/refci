@@ -18,9 +18,14 @@ type deleteRepoMsg struct {
 	err     error
 }
 
-type branchesLoadRepoMsg struct {
-	repos []core.CodeRepo
+type addBranchMsg struct {
+	added core.BranchConf
 	err   error
+}
+
+type delBranchMsg struct {
+	del core.BranchConf
+	err error
 }
 
 type branchesLoadBranchConfMsg struct {

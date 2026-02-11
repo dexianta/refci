@@ -11,6 +11,9 @@ func renderHint(key, desc string) string {
 }
 
 func modIdx(idx, mod, delta int) int {
+	if mod == 0 {
+		return 0
+	}
 	if delta > 0 {
 		delta = 1
 	}

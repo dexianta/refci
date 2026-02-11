@@ -68,3 +68,12 @@ func SafeIdx[T any](idx int, slice []T) (ret T) {
 	}
 	return slice[idx]
 }
+
+func RemoveRepos(repos []CodeRepo, name string) (ret []CodeRepo) {
+	for _, repo := range repos {
+		if repo.Repo != name {
+			ret = append(ret, repo)
+		}
+	}
+	return ret
+}

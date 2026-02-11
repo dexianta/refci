@@ -22,6 +22,46 @@ var (
 
 	branchesRegionFocusedStyle = branchesRegionStyle.
 					BorderForeground(lipgloss.Color("45"))
+
+	// reload branch & jobs
+	loadBranchCmd = func(dbRepo core.DbRepo, repoName string) func() tea.Msg {
+		return func() tea.Msg {
+			branches, err := dbRepo.ListBranchConf(repoName)
+			return branchesLoadBranchConfMsg{
+				branchConf: branches,
+				err:        err,
+			}
+		}
+	}
+
+	addBranchConfCmd = func(dbRepo core.DbRepo, repo, ref, script string) func() tea.Msg {
+		return func() tea.Msg {
+			added := core.BranchConf{
+				Repo:       repo,
+				RefPattern: ref,
+				ScriptPath: script,
+			}
+			err := dbRepo.SaveBranchConf(added)
+			return addBranchMsg{
+				added: added,
+				err:   err,
+			}
+		}
+	}
+
+	delBranchConfCmd = func(dbRepo core.DbRepo, repo, ref string) func() tea.Msg {
+		return func() tea.Msg {
+			del := core.BranchConf{
+				Repo:       repo,
+				RefPattern: ref,
+			}
+			err := dbRepo.DeleteBranchConf(repo, ref)
+			return delBranchMsg{
+				del: del,
+				err: err,
+			}
+		}
+	}
 )
 
 type branchModel struct {
@@ -29,6 +69,7 @@ type branchModel struct {
 	svc                core.SvcImpl
 	repos              []core.CodeRepo
 	branchConf         []core.BranchConf
+	branchConfForm     form
 	jobs               []core.Job
 	statusMsg          string
 	statusInErr        bool
@@ -40,8 +81,9 @@ type branchModel struct {
 
 func newBranchModel(repo core.DbRepo, svc core.SvcImpl) branchModel {
 	return branchModel{
-		dbRepo: repo,
-		svc:    svc,
+		dbRepo:         repo,
+		svc:            svc,
+		branchConfForm: newForm([]KV{}, 20, true),
 	}
 }
 
@@ -51,18 +93,22 @@ func (b branchModel) View() string {
 
 func (b branchModel) Update(msg tea.Msg) (branchModel, tea.Cmd) {
 	switch m := msg.(type) {
-	case loadRepoMsg:
+	case loadRepoMsg: // can be reused for reload
 		b.repos = m.repos
 		if m.err != nil {
 			b.statusMsg = m.err.Error()
 			b.statusInErr = true
 		}
+		return b, loadBranchCmd(b.dbRepo, b.repos[b.selectedRepo].Repo)
+
 	case addRepoMsg:
 		b.repos = append(b.repos, m.repo)
 		if m.err != nil {
 			b.statusMsg = m.err.Error()
 			b.statusInErr = true
 		}
+		return b, nil
+
 	case deleteRepoMsg:
 		b.repos = m.repos
 		if m.err != nil {
@@ -94,28 +140,6 @@ func (b branchModel) Update(msg tea.Msg) (branchModel, tea.Cmd) {
 			return b, nil
 		}
 
-		// reload branch & jobs
-		branchCmd := func(repoIdx int) func() tea.Msg {
-			return func() tea.Msg {
-				branches, err := b.dbRepo.ListBranchConf(core.SafeIdx(repoIdx, b.repos).Repo)
-				return branchesLoadBranchConfMsg{
-					branchConf: branches,
-					err:        err,
-				}
-			}
-		}
-		jobCmd := func(repoIdx, branchIdx int) func() tea.Msg {
-			return func() tea.Msg {
-				jobs, err := b.dbRepo.ListJob(core.JobFilter{
-					Repo: core.SafeIdx(repoIdx, b.repos).Repo,
-					Ref:  core.SafeIdx(branchIdx, b.branchConf).RefPattern,
-				})
-				return branchesLoadJobMsg{
-					jobs: jobs,
-					err:  err,
-				}
-			}
-		}
 		switch b.activeTab {
 		case 0:
 			switch m.String() {
@@ -123,26 +147,31 @@ func (b branchModel) Update(msg tea.Msg) (branchModel, tea.Cmd) {
 				b.selectedRepo = modIdx(b.selectedRepo, len(b.repos), -1)
 				b.selectedBranchConf = 0
 				b.selectedJobs = 0
-				return b, tea.Sequence(branchCmd(b.selectedRepo), jobCmd(b.selectedRepo, 0))
+				return b, loadBranchCmd(b.dbRepo, b.repos[b.selectedRepo].Repo)
 			case "down":
 				b.selectedRepo = modIdx(b.selectedRepo, len(b.repos), 1)
 				b.selectedBranchConf = 0
 				b.selectedJobs = 0
-				return b, tea.Sequence(branchCmd(b.selectedRepo), jobCmd(b.selectedRepo, 0))
+				return b, loadBranchCmd(b.dbRepo, b.repos[b.selectedRepo].Repo)
 			}
 
 		case 1:
 			// each switch need to fetch the job
-			switch m.String() {
-			case "up":
-				b.selectedBranchConf = modIdx(b.selectedBranchConf, len(b.branchConf), -1)
-				b.selectedJobs = 0
-				return b, jobCmd(b.selectedRepo, b.selectedBranchConf)
-			case "down":
-				b.selectedBranchConf = modIdx(b.selectedBranchConf, len(b.branchConf), 1)
-				b.selectedJobs = 0
-				return b, jobCmd(b.selectedRepo, b.selectedBranchConf)
+			b.branchConfForm = b.branchConfForm.Update(m)
+			b.selectedBranchConf = b.branchConfForm.idx
+			b.selectedJobs = 0
+			addKV, delKV := b.branchConfForm.addKV, b.branchConfForm.delKV
+			var addCmd, delCmd tea.Cmd
+			if addKV != nil {
+				addCmd = addBranchConfCmd(b.dbRepo, b.repos[b.selectedRepo].Repo, addKV.key, addKV.val)
+				b.branchConfForm.addKV = nil
 			}
+			if delKV != nil {
+				delCmd = delBranchConfCmd(b.dbRepo, b.repos[b.selectedRepo].Repo, delKV.key)
+				b.branchConfForm.delKV = nil
+			}
+			return b, tea.Batch(addCmd, delCmd)
+
 		case 2:
 			switch m.String() {
 			case "up":
@@ -155,7 +184,7 @@ func (b branchModel) Update(msg tea.Msg) (branchModel, tea.Cmd) {
 	return b, nil
 }
 
-func renderRegion(title string, lines []string, focused bool) string {
+func renderRegion(title string, lines []string, helpText string, focused bool) string {
 	style := branchesRegionStyle
 	if focused {
 		style = branchesRegionFocusedStyle
@@ -166,6 +195,9 @@ func renderRegion(title string, lines []string, focused bool) string {
 		sectionTitleStyle.Render(title),
 		"",
 		strings.Join(lines, "\n\n"),
+		"",
+		"",
+		mutedStyle.Render(helpText),
 	)
 
 	return style.Render(content)
@@ -180,7 +212,7 @@ func (b branchModel) renderRepo() string {
 			text = append(text, "  "+r.Repo)
 		}
 	}
-	return renderRegion("Repos", text, b.activeTab == 0)
+	return renderRegion("Repos", text, "", b.activeTab == 0)
 }
 
 func (b branchModel) renderBranchConf() string {
@@ -193,7 +225,8 @@ func (b branchModel) renderBranchConf() string {
 			text = append(text, "  "+line)
 		}
 	}
-	return renderRegion("Branch Conf", text, b.activeTab == 1)
+
+	return renderRegion("Branch Conf", []string{b.branchConfForm.View()}, "", b.activeTab == 1)
 }
 
 func (b branchModel) renderJobs() string {
@@ -206,7 +239,7 @@ func (b branchModel) renderJobs() string {
 			text = append(text, "  "+line)
 		}
 	}
-	return renderRegion("Last Jobs", text, b.activeTab == 2)
+	return renderRegion("Last Jobs", text, "", b.activeTab == 2)
 }
 
 func jobLine(j core.Job, now time.Time) string {
