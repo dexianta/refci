@@ -3,10 +3,15 @@ package core
 import (
 	neturl "net/url"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
 var Root, _ = os.Getwd()
+
+func LocalPath(path ...string) string {
+	return filepath.Join(append([]string{Root}, path...)...)
+}
 
 func ToLocalRepo(repo string) string {
 	return strings.ReplaceAll(repo, "/", "--")
@@ -78,9 +83,9 @@ func RemoveRepos(repos []CodeRepo, name string) (ret []CodeRepo) {
 	return ret
 }
 
-func RemoveBranchConf(confs []BranchConf, repo, ref string) (ret []BranchConf) {
+func RemoveJobConf(confs []JobConf, repo, name string) (ret []JobConf) {
 	for _, conf := range confs {
-		if conf.RefPattern != ref || conf.Repo != repo {
+		if conf.Name != name || conf.Repo != repo {
 			ret = append(ret, conf)
 		}
 	}

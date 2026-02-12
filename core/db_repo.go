@@ -7,12 +7,6 @@ type CodeRepo struct {
 	URL  string // should we distinguish ssh or https
 }
 
-type BranchConf struct {
-	Repo       string
-	RefPattern string
-	ScriptPath string
-}
-
 type RepoSetting struct {
 	Repo  string
 	Key   string
@@ -25,7 +19,8 @@ type GlobalSetting struct {
 
 type Job struct {
 	Repo   string
-	Ref    string // refs/heads/main
+	Name   string
+	Branch string
 	SHA    string
 	Start  time.Time
 	End    time.Time
@@ -43,28 +38,14 @@ var (
 
 type JobFilter struct {
 	Repo   string
-	Ref    string
+	Name   string
+	Branch string
 	Status string
 }
 
 type DbRepo interface {
-	SaveBranchConf(bc BranchConf) error
-	ListBranchConf(repo string) ([]BranchConf, error)
-	UpdateBranchConf(bc BranchConf) error
-	DeleteBranchConf(repo, refPattern string) error
-	DeleteBranchConfByRepo(repo string) error
-
-	SaveCodeRepo(repo CodeRepo) error
-	ListCodeRepo() ([]CodeRepo, error)
-	DeleteRepo(repo string) error
-
-	SaveRepoSetting(setting RepoSetting) error
-	ListRepoSetting(repo string) ([]RepoSetting, error)
-	DeleteRepoSetting(repo, key string) error
-	DeleteRepoSettingByRepo(repo string) error
-
-	FetchJob(repo, ref, sha string) (Job, error)
-	CreateJob(repo, ref, sha string) error
-	UpdateJob(repo, ref, sha, status, msg string) error // for cancel, or finish etc
+	LatestJobByNameBranch(repo, name, branch string) (Job, error)
+	CreateJob(repo, name, branch, sha string) error
+	UpdateJob(repo, name, branch, sha, status, msg string) error // for cancel, or finish etc
 	ListJob(filter JobFilter) ([]Job, error)
 }

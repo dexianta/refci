@@ -2,6 +2,7 @@ package core
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -23,34 +24,19 @@ func NewSQLiteRepo(db *sql.DB) (*SQLiteRepo, error) {
 
 func (r SQLiteRepo) ensureSchema() error {
 	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS code_repos (
-				repo TEXT PRIMARY KEY,
-				url TEXT NOT NULL
-			);`,
-		`CREATE TABLE IF NOT EXISTS repo_settings (
-				repo TEXT NOT NULL,
-				key TEXT NOT NULL,
-				value TEXT NOT NULL,
-				PRIMARY KEY (repo, key)
-			);`,
-		`CREATE TABLE IF NOT EXISTS branch_conf (
-				repo TEXT NOT NULL,
-				ref_pattern TEXT NOT NULL,
-				script_path TEXT NOT NULL,
-				PRIMARY KEY (repo, ref_pattern)
-		);`,
 		`CREATE TABLE IF NOT EXISTS jobs (
 			repo TEXT NOT NULL,
-			ref TEXT NOT NULL,
+			name TEXT NOT NULL,
+			branch TEXT NOT NULL,
 			sha TEXT NOT NULL,
 			start_at TEXT NOT NULL,
 			end_at TEXT,
 			status TEXT NOT NULL,
 			msg TEXT NOT NULL DEFAULT '',
-			PRIMARY KEY (repo, ref, sha)
+			PRIMARY KEY (repo, name, branch, sha)
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_jobs_repo_ref_status_start
-		 ON jobs(repo, ref, status, start_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_jobs_repo_name_branch_status_start
+		 ON jobs(repo, name, branch, status, start_at DESC);`,
 	}
 
 	for _, stmt := range stmts {
@@ -61,185 +47,24 @@ func (r SQLiteRepo) ensureSchema() error {
 	return nil
 }
 
-func (r SQLiteRepo) SaveBranchConf(bc BranchConf) error {
-	_, err := r.db.Exec(
-		`INSERT INTO branch_conf (repo, ref_pattern, script_path)
-		 VALUES (?, ?, ?)
-		 ON CONFLICT(repo, ref_pattern) DO UPDATE
-		 SET script_path = excluded.script_path`,
-		bc.Repo, bc.RefPattern, bc.ScriptPath,
-	)
-	if err != nil {
-		return fmt.Errorf("save branch conf: %w", err)
-	}
-	return nil
-}
-
-func (r SQLiteRepo) ListBranchConf(repo string) ([]BranchConf, error) {
-	rows, err := r.db.Query(
-		`SELECT repo, ref_pattern, script_path FROM branch_conf WHERE repo = ? ORDER BY ref_pattern ASC`,
-		repo,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list branch conf: %w", err)
-	}
-	defer rows.Close()
-
-	var out []BranchConf
-	for rows.Next() {
-		var bc BranchConf
-		if err := rows.Scan(&bc.Repo, &bc.RefPattern, &bc.ScriptPath); err != nil {
-			return nil, fmt.Errorf("scan branch conf: %w", err)
-		}
-		out = append(out, bc)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate branch conf: %w", err)
-	}
-	return out, nil
-}
-
-func (r SQLiteRepo) UpdateBranchConf(bc BranchConf) error {
-	res, err := r.db.Exec(
-		`UPDATE branch_conf SET script_path = ? WHERE repo = ? AND ref_pattern = ?`,
-		bc.ScriptPath, bc.Repo, bc.RefPattern,
-	)
-	if err != nil {
-		return fmt.Errorf("update branch conf: %w", err)
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return sql.ErrNoRows
-	}
-	return nil
-}
-
-func (r SQLiteRepo) DeleteBranchConf(repo, refPattern string) error {
-	_, err := r.db.Exec(
-		`DELETE FROM branch_conf WHERE repo = ? AND ref_pattern = ?`,
-		repo, refPattern,
-	)
-	if err != nil {
-		return fmt.Errorf("delete branch conf: %w", err)
-	}
-	return nil
-}
-
-func (r SQLiteRepo) DeleteBranchConfByRepo(repo string) error {
-	_, err := r.db.Exec(`DELETE FROM branch_conf WHERE repo = ?`, repo)
-	if err != nil {
-		return fmt.Errorf("delete branch conf by repo: %w", err)
-	}
-	return nil
-}
-
-func (r SQLiteRepo) SaveCodeRepo(repo CodeRepo) error {
-	_, err := r.db.Exec(
-		`INSERT INTO code_repos (repo, url)
-		 VALUES (?, ?)
-		 ON CONFLICT(repo) DO UPDATE SET url = excluded.url`,
-		repo.Repo, repo.URL,
-	)
-	if err != nil {
-		return fmt.Errorf("save code repo: %w", err)
-	}
-	return nil
-}
-
-func (r SQLiteRepo) ListCodeRepo() ([]CodeRepo, error) {
-	rows, err := r.db.Query(`SELECT repo, url FROM code_repos ORDER BY repo ASC`)
-	if err != nil {
-		return nil, fmt.Errorf("list code repo: %w", err)
-	}
-	defer rows.Close()
-
-	var out []CodeRepo
-	for rows.Next() {
-		var c CodeRepo
-		if err := rows.Scan(&c.Repo, &c.URL); err != nil {
-			return nil, fmt.Errorf("scan code repo: %w", err)
-		}
-		out = append(out, c)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate code repo: %w", err)
-	}
-	return out, nil
-}
-
-func (r SQLiteRepo) DeleteRepo(repo string) error {
-	_, err := r.db.Exec(`DELETE FROM code_repos WHERE repo = ?`, repo)
-	if err != nil {
-		return fmt.Errorf("delete repo: %w", err)
-	}
-	return nil
-}
-
-func (r SQLiteRepo) SaveRepoSetting(setting RepoSetting) error {
-	_, err := r.db.Exec(
-		`INSERT INTO repo_settings (repo, key, value)
-		 VALUES (?, ?, ?)
-		 ON CONFLICT(repo, key) DO UPDATE SET value = excluded.value`,
-		setting.Repo, setting.Key, setting.Value,
-	)
-	if err != nil {
-		return fmt.Errorf("save repo setting: %w", err)
-	}
-	return nil
-}
-
-func (r SQLiteRepo) ListRepoSetting(repo string) ([]RepoSetting, error) {
-	rows, err := r.db.Query(
-		`SELECT repo, key, value FROM repo_settings WHERE repo = ? ORDER BY key ASC`,
-		repo,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("list repo setting: %w", err)
-	}
-	defer rows.Close()
-
-	var out []RepoSetting
-	for rows.Next() {
-		var s RepoSetting
-		if err := rows.Scan(&s.Repo, &s.Key, &s.Value); err != nil {
-			return nil, fmt.Errorf("scan repo setting: %w", err)
-		}
-		out = append(out, s)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate repo setting: %w", err)
-	}
-	return out, nil
-}
-
-func (r SQLiteRepo) DeleteRepoSetting(repo, key string) error {
-	_, err := r.db.Exec(`DELETE FROM repo_settings WHERE repo = ? AND key = ?`, repo, key)
-	if err != nil {
-		return fmt.Errorf("delete repo setting: %w", err)
-	}
-	return nil
-}
-
-func (r SQLiteRepo) DeleteRepoSettingByRepo(repo string) error {
-	_, err := r.db.Exec(`DELETE FROM repo_settings WHERE repo = ?`, repo)
-	if err != nil {
-		return fmt.Errorf("delete repo setting by repo: %w", err)
-	}
-	return nil
-}
-
-func (r SQLiteRepo) FetchJob(repo, ref, sha string) (Job, error) {
+func (r SQLiteRepo) LatestJobByNameBranch(repo, name, branch string) (Job, error) {
 	var (
 		j       Job
 		startAt string
 		endAt   sql.NullString
 	)
 	err := r.db.QueryRow(
-		`SELECT repo, ref, sha, start_at, end_at, status, msg
+		`SELECT repo, name, branch, sha, start_at, end_at, status, msg
 		 FROM jobs
-		 WHERE repo = ? AND ref = ? AND sha = ?`,
-		repo, ref, sha,
-	).Scan(&j.Repo, &j.Ref, &j.SHA, &startAt, &endAt, &j.Status, &j.Msg)
+		 WHERE repo = ? AND name = ? AND branch = ?
+		 ORDER BY start_at DESC
+		 LIMIT 1`,
+		repo, name, branch,
+	).Scan(&j.Repo, &j.Name, &j.Branch, &j.SHA, &startAt, &endAt, &j.Status, &j.Msg)
 	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Job{}, nil
+		}
 		return Job{}, err
 	}
 
@@ -256,12 +81,13 @@ func (r SQLiteRepo) FetchJob(repo, ref, sha string) (Job, error) {
 	return j, nil
 }
 
-func (r SQLiteRepo) CreateJob(repo, ref, sha string) error {
+func (r SQLiteRepo) CreateJob(repo, name, branch, sha string) error {
 	now := formatStoredTime(time.Now().UTC())
 	_, err := r.db.Exec(
-		`INSERT INTO jobs (repo, ref, sha, start_at, status, msg)
-		 VALUES (?, ?, ?, ?, ?, '')`,
-		repo, ref, sha, now, StatusPending,
+		`INSERT INTO jobs (repo, name, branch, sha, start_at, status, msg)
+		 VALUES (?, ?, ?, ?, ?, ?, '')
+		 ON CONFLICT(repo, name, branch, sha) DO NOTHING`,
+		repo, name, branch, sha, now, StatusPending,
 	)
 	if err != nil {
 		return fmt.Errorf("create job: %w", err)
@@ -269,7 +95,7 @@ func (r SQLiteRepo) CreateJob(repo, ref, sha string) error {
 	return nil
 }
 
-func (r SQLiteRepo) UpdateJob(repo, ref, sha, status, msg string) error {
+func (r SQLiteRepo) UpdateJob(repo, name, branch, sha, status, msg string) error {
 	now := formatStoredTime(time.Now().UTC())
 	_, err := r.db.Exec(
 		`UPDATE jobs
@@ -279,12 +105,12 @@ func (r SQLiteRepo) UpdateJob(repo, ref, sha, status, msg string) error {
 		                WHEN ? IN (?, ?, ?) THEN ?
 		                ELSE end_at
 		              END
-		 WHERE repo = ? AND ref = ? AND sha = ?`,
+		 WHERE repo = ? AND name = ? AND branch = ? AND sha = ?`,
 		status,
 		msg,
 		status, StatusFinished, StatusFailed, StatusCanceled,
 		now,
-		repo, ref, sha,
+		repo, name, branch, sha,
 	)
 	if err != nil {
 		return fmt.Errorf("update job: %w", err)
@@ -302,16 +128,20 @@ func (r SQLiteRepo) ListJob(filter JobFilter) ([]Job, error) {
 		where = append(where, "repo = ?")
 		args = append(args, filter.Repo)
 	}
-	if strings.TrimSpace(filter.Ref) != "" {
-		where = append(where, "ref = ?")
-		args = append(args, filter.Ref)
+	if strings.TrimSpace(filter.Name) != "" {
+		where = append(where, "name = ?")
+		args = append(args, filter.Name)
+	}
+	if strings.TrimSpace(filter.Branch) != "" {
+		where = append(where, "branch = ?")
+		args = append(args, filter.Branch)
 	}
 	if strings.TrimSpace(filter.Status) != "" {
 		where = append(where, "status = ?")
 		args = append(args, filter.Status)
 	}
 
-	query := `SELECT repo, ref, sha, start_at, end_at, status, msg FROM jobs`
+	query := `SELECT repo, name, branch, sha, start_at, end_at, status, msg FROM jobs`
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -330,7 +160,7 @@ func (r SQLiteRepo) ListJob(filter JobFilter) ([]Job, error) {
 			startAt string
 			endAt   sql.NullString
 		)
-		if err := rows.Scan(&j.Repo, &j.Ref, &j.SHA, &startAt, &endAt, &j.Status, &j.Msg); err != nil {
+		if err := rows.Scan(&j.Repo, &j.Name, &j.Branch, &j.SHA, &startAt, &endAt, &j.Status, &j.Msg); err != nil {
 			return nil, fmt.Errorf("scan job: %w", err)
 		}
 		j.Start, err = parseStoredTime(startAt)

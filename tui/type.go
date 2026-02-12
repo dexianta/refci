@@ -2,58 +2,14 @@ package tui
 
 import "dexianta/nci/core"
 
-type addRepoMsg struct {
-	repo core.CodeRepo
-	err  error
-}
-
-type loadRepoMsg struct {
-	repos []core.CodeRepo
-	err   error
-}
-
-type deleteRepoMsg struct {
-	deleted string
-	repos   []core.CodeRepo
-	err     error
-}
-
-type addBranchMsg struct {
-	added core.BranchConf
-	err   error
-}
-
-type delBranchMsg struct {
-	del core.BranchConf
-	err error
-}
-
-type loadBranchConfMsg struct {
-	branchConf []core.BranchConf
-	err        error
-}
-
-type branchesLoadJobMsg struct {
+type loadRepoJobsMsg struct {
+	repo string
 	jobs []core.Job
 	err  error
 }
 
-type loadRepoSettingMsg struct {
-	repo     string
-	settings []core.RepoSetting
-	err      error
-}
-
-type addSettingMsg struct {
-	add core.RepoSetting
-	err error
-}
-
-type delSettingMsg struct {
-	del core.RepoSetting
-	err error
-}
-
-type selectRepoMsg struct {
-	repo string
+type loadJobLogMsg struct {
+	path  string
+	lines []string
+	err   error
 }
