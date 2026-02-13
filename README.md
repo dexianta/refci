@@ -1,6 +1,6 @@
-# refci (New CI)
+# refci 
 
-`refci` is a local CI runner for repos you already control.
+`refci` is a local CI runner for repos you already control. (ref ci: fetch refs, compare SHA, run jobs)
 
 ## Why this exists
 0. [The Pain That is Github Actions](https://news.ycombinator.com/item?id=43419701)
