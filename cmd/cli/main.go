@@ -4,11 +4,12 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
-	"dexianta/nci/core"
-	"dexianta/nci/tui"
+	"dexianta/refci/core"
+	"dexianta/refci/tui"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -22,10 +23,10 @@ type runtimeConfig struct {
 	Env  []string
 }
 
-// - nci init (for init root)
-// - nci clone <git-repo> (this download the code into repos folder)
-// - nci -e <env_path>  <repos/repo_name>  // to start running poll for this one repo
-// - future direction: parse each repos root/.nci folder, and generate .env file, the bash script file name can match the branch pattern
+// - refci init (for init root)
+// - refci clone <git-repo> (this download the code into repos folder)
+// - refci -e <env_path>  <repos/repo_name>  // to start running poll for this one repo
+// - future direction: parse each repos root/.refci folder, and generate .env file, the bash script file name can match the branch pattern
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		fmt.Fprintln(os.Stderr, "error:", err)
@@ -34,21 +35,33 @@ func main() {
 }
 
 func run(args []string) error {
-	if len(args) > 0 {
-		switch args[0] {
-		case "init":
-			return runInit(args[1:])
-		case "clone":
-			return runClone(args[1:])
-		}
+	if len(args) == 0 {
+		printMainUsage(os.Stdout)
+		return nil
+	}
+	if isHelpArg(args[0]) || args[0] == "help" {
+		printMainUsage(os.Stdout)
+		return nil
+	}
+
+	switch args[0] {
+	case "init":
+		return runInit(args[1:])
+	case "clone":
+		return runClone(args[1:])
 	}
 
 	return runPollLoop(args)
 }
 
 func runInit(args []string) error {
+	if len(args) == 1 && isHelpArg(args[0]) {
+		printInitUsage(os.Stdout)
+		return nil
+	}
 	if len(args) > 1 {
-		return fmt.Errorf("usage: nci init [path]")
+		printInitUsage(os.Stderr)
+		return fmt.Errorf("init accepts at most one argument")
 	}
 
 	path := "."
@@ -64,13 +77,18 @@ func runInit(args []string) error {
 	if err != nil {
 		absPath = path
 	}
-	fmt.Printf("nci root created at %s\n", absPath)
+	fmt.Printf("refci root created at %s\n", absPath)
 	return nil
 }
 
 func runClone(args []string) error {
+	if len(args) == 1 && isHelpArg(args[0]) {
+		printCloneUsage(os.Stdout)
+		return nil
+	}
 	if len(args) != 1 {
-		return errors.New("usage: nci clone <git-repo>")
+		printCloneUsage(os.Stderr)
+		return errors.New("clone requires exactly one git URL")
 	}
 
 	repoURL := strings.TrimSpace(args[0])
@@ -93,16 +111,23 @@ func runClone(args []string) error {
 }
 
 func runPollLoop(args []string) error {
-	fs := flag.NewFlagSet("nci", flag.ContinueOnError)
+	fs := flag.NewFlagSet("refci", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
 	envPath := fs.String("e", ".env", "env file path")
 	interval := fs.Duration("interval", 3*time.Second, "poll interval")
 	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printPollUsage(os.Stdout)
+			return nil
+		}
+		printPollUsage(os.Stderr)
 		return err
 	}
 
 	rest := fs.Args()
 	if len(rest) != 1 {
-		return errors.New("usage: nci -e <env_path> <repos/repo_name>")
+		printPollUsage(os.Stderr)
+		return errors.New("poll mode requires exactly one repo target")
 	}
 	if *interval <= 0 {
 		return errors.New("interval must be > 0")
@@ -156,10 +181,10 @@ func runPollLoop(args []string) error {
 			} else {
 				jobs, err := core.LoadJobConfsFromRepo(ctx, cfg.Repo, "HEAD")
 				if err != nil {
-					reportFatal(fmt.Errorf("load .nci/conf.yml: %w", err))
+					reportFatal(fmt.Errorf("load .refci/conf.yml: %w", err))
 					return
 				} else if len(jobs) == 0 {
-					reportFatal(fmt.Errorf("no jobs found in .nci/conf.yml for %s", cfg.Repo))
+					reportFatal(fmt.Errorf("no jobs found in .refci/conf.yml for %s", cfg.Repo))
 					return
 				} else if err := pollOnce(ctx, dbRepo, runner, cfg, jobs); err != nil {
 					reportFatal(fmt.Errorf("poll failed: %w", err))
@@ -238,7 +263,7 @@ func fetchMirror(ctx context.Context, mirrorPath string) error {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("stat mirror path: %w", err)
 		}
-		return fmt.Errorf("repo mirror not found (%s), run: nci clone <git-repo>", mirrorPath)
+		return fmt.Errorf("repo mirror not found (%s), run: refci clone <git-repo>", mirrorPath)
 	}
 
 	return core.FetchMirror(ctx, mirrorPath)
@@ -251,7 +276,7 @@ func openDB() (*sql.DB, core.DbRepo, error) {
 
 	db, err := core.OpenDB(core.DBConfig{
 		Kind:       core.DBSQLite,
-		SQLitePath: filepath.Join(core.Root, "nci.db"),
+		SQLitePath: filepath.Join(core.Root, "refci.db"),
 	})
 	if err != nil {
 		return nil, nil, err
@@ -272,10 +297,10 @@ func ensureRootAtCWD() error {
 	}
 	core.Root = absRoot
 
-	dbPath := filepath.Join(core.Root, "nci.db")
+	dbPath := filepath.Join(core.Root, "refci.db")
 	if _, err := os.Stat(dbPath); err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("not an nci root (%s missing). run: nci init", dbPath)
+			return fmt.Errorf("not an refci root (%s missing). run: refci init", dbPath)
 		}
 		return fmt.Errorf("stat db: %w", err)
 	}
@@ -338,4 +363,58 @@ func pollOnce(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, c
 		}
 	}
 	return nil
+}
+
+func isHelpArg(v string) bool {
+	switch strings.TrimSpace(v) {
+	case "-h", "--help":
+		return true
+	default:
+		return false
+	}
+}
+
+func printMainUsage(w io.Writer) {
+	fmt.Fprintln(w, "refci - local CI runner")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  refci init [path]")
+	fmt.Fprintln(w, "  refci clone <git-repo-url>")
+	fmt.Fprintln(w, "  refci -e <env_file> [-interval 3s] <repo-target>")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Repo target:")
+	fmt.Fprintln(w, "  owner/repo | owner--repo | repos/owner--repo | /abs/path/to/repos/owner--repo")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Examples:")
+	fmt.Fprintln(w, "  refci init .")
+	fmt.Fprintln(w, "  refci clone git@github.com:owner/repo.git")
+	fmt.Fprintln(w, "  refci -e .env owner/repo")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Help:")
+	fmt.Fprintln(w, "  refci --help")
+	fmt.Fprintln(w, "  refci init --help")
+	fmt.Fprintln(w, "  refci clone --help")
+}
+
+func printInitUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: refci init [path]")
+	fmt.Fprintln(w, "Create a refci root at path (default: current directory).")
+}
+
+func printCloneUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: refci clone <git-repo-url>")
+	fmt.Fprintln(w, "Clone a mirror repo into <root>/repos.")
+}
+
+func printPollUsage(w io.Writer) {
+	fmt.Fprintln(w, "Usage: refci -e <env_file> [-interval 3s] <repo-target>")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Flags:")
+	fmt.Fprintln(w, "  -e string")
+	fmt.Fprintln(w, "      env file path (default \".env\")")
+	fmt.Fprintln(w, "  -interval duration")
+	fmt.Fprintln(w, "      poll interval (default 3s)")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Repo target:")
+	fmt.Fprintln(w, "  owner/repo | owner--repo | repos/owner--repo | /abs/path/to/repos/owner--repo")
 }

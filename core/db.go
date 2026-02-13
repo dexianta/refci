@@ -51,7 +51,7 @@ func resolveDriver(cfg DBConfig) (driverName string, dsn string, err error) {
 	case DBSQLite:
 		path := strings.TrimSpace(cfg.SQLitePath)
 		if path == "" {
-			path = "nci.db"
+			path = "refci.db"
 		}
 		return "sqlite", path, nil
 	case DBPostgres:

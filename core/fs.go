@@ -24,7 +24,7 @@ func InitRoot(path string) error {
 		}
 	}
 
-	dbPath := filepath.Join(root, "nci.db")
+	dbPath := filepath.Join(root, "refci.db")
 	db, err := OpenDB(DBConfig{
 		Kind:       DBSQLite,
 		SQLitePath: dbPath,

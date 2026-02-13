@@ -172,7 +172,7 @@ func LoadJobConfsFromRepo(ctx context.Context, repo, ref string) ([]JobConf, err
 	}
 
 	mirrorPath := filepath.Join(Root, "repos", ToLocalRepo(repoName))
-	content, err := runGitOutput(ctx, mirrorPath, "show", rev+":.nci/conf.yml")
+	content, err := runGitOutput(ctx, mirrorPath, "show", rev+":.refci/conf.yml")
 	if err != nil {
 		return nil, err
 	}

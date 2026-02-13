@@ -2,7 +2,7 @@ package tui
 
 import (
 	"context"
-	"dexianta/nci/core"
+	"dexianta/refci/core"
 	"errors"
 	"fmt"
 	"strings"
@@ -91,7 +91,7 @@ func (m topModel) View() string {
 	}
 
 	subHeader := mutedStyle.Render(fmt.Sprintf("%s", m.now.Format("2006-01-02 15:04:05 Z07:00")))
-	header := lipgloss.JoinHorizontal(lipgloss.Top, headerStyle.Render("nci  -  zero-overhead CI"), " ", subHeader)
+	header := lipgloss.JoinHorizontal(lipgloss.Top, headerStyle.Render("refci  -  zero-overhead CI"), " ", subHeader)
 	body := m.logsModel.View()
 	footer := lipgloss.JoinVertical(lipgloss.Top, m.logsModel.help(), "", globalFooter)
 	repoLabel := sectionTitleStyle.Render(fmt.Sprint("\n", ">> "+m.repo, "\n"))

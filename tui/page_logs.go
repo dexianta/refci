@@ -1,7 +1,7 @@
 package tui
 
 import (
-	"dexianta/nci/core"
+	"dexianta/refci/core"
 	"fmt"
 	"os"
 	"path/filepath"

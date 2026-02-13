@@ -2,13 +2,13 @@
 set -euo pipefail
 
 # Usage examples:
-#   curl -fsSL https://raw.githubusercontent.com/dexianta/nci/main/install.sh | bash
-#   NCI_REF=v0.1.0 curl -fsSL .../install.sh | bash
-#   NCI_INSTALL_DIR="$HOME/bin" curl -fsSL .../install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/dexianta/refci/main/install.sh | bash
+#   REFCI_REF=v0.1.0 curl -fsSL .../install.sh | bash
+#   REFCI_INSTALL_DIR="$HOME/bin" curl -fsSL .../install.sh | bash
 
-NCI_REPO="${NCI_REPO:-https://github.com/dexianta/nci.git}"
-NCI_REF="${NCI_REF:-main}"
-NCI_INSTALL_DIR="${NCI_INSTALL_DIR:-}"
+REFCI_REPO="${REFCI_REPO:-${NCI_REPO:-https://github.com/dexianta/refci.git}}"
+REFCI_REF="${REFCI_REF:-${NCI_REF:-main}}"
+REFCI_INSTALL_DIR="${REFCI_INSTALL_DIR:-${NCI_INSTALL_DIR:-}}"
 
 need_cmd() {
   if ! command -v "$1" >/dev/null 2>&1; then
@@ -22,8 +22,8 @@ need_cmd go
 need_cmd mktemp
 
 pick_install_dir() {
-  if [[ -n "$NCI_INSTALL_DIR" ]]; then
-    echo "$NCI_INSTALL_DIR"
+  if [[ -n "$REFCI_INSTALL_DIR" ]]; then
+    echo "$REFCI_INSTALL_DIR"
     return
   fi
 
@@ -44,19 +44,19 @@ cleanup() {
 }
 trap cleanup EXIT
 
-echo "==> Cloning nci ($NCI_REF)"
-git clone --depth 1 --branch "$NCI_REF" "$NCI_REPO" "$TMP_DIR/src"
+echo "==> Cloning refci ($REFCI_REF)"
+git clone --depth 1 --branch "$REFCI_REF" "$REFCI_REPO" "$TMP_DIR/src"
 
 cd "$TMP_DIR/src"
 
-echo "==> Building nci"
-go build -o "$TMP_DIR/nci" ./cmd/cli
+echo "==> Building refci"
+go build -o "$TMP_DIR/refci" ./cmd/cli
 
-echo "==> Installing to $INSTALL_DIR/nci"
-install -m 0755 "$TMP_DIR/nci" "$INSTALL_DIR/nci"
+echo "==> Installing to $INSTALL_DIR/refci"
+install -m 0755 "$TMP_DIR/refci" "$INSTALL_DIR/refci"
 
-echo "==> Installed: $INSTALL_DIR/nci"
-if ! command -v nci >/dev/null 2>&1; then
+echo "==> Installed: $INSTALL_DIR/refci"
+if ! command -v refci >/dev/null 2>&1; then
   case ":$PATH:" in
     *":$INSTALL_DIR:"*) ;;
     *)

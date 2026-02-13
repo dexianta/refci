@@ -1,6 +1,6 @@
 package tui
 
-import "dexianta/nci/core"
+import "dexianta/refci/core"
 
 type loadRepoJobsMsg struct {
 	repo string

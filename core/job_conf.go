@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-// LoadJobConfs loads job definitions from .nci/conf.yml format.
+// LoadJobConfs loads job definitions from .refci/conf.yml format.
 // Supported shape:
 //
 //	actions:
@@ -15,13 +15,13 @@ import (
 //	    branch_pattern: "main"
 //	    path_patterns:
 //	      - "services/**"
-//	    script: ".nci/main.sh"
+//	    script: ".refci/main.sh"
 //
 // It also accepts action map at top-level (without "actions:").
 func LoadJobConfs(path string) ([]JobConf, error) {
 	confPath := strings.TrimSpace(path)
 	if confPath == "" {
-		confPath = filepath.Join(".nci", "conf.yml")
+		confPath = filepath.Join(".refci", "conf.yml")
 	}
 
 	data, err := os.ReadFile(confPath)
@@ -58,7 +58,7 @@ func ParseJobConfs(raw string) []JobConf {
 			continue
 		}
 
-		if after, ok :=strings.CutPrefix(trimmed, "- "); ok  {
+		if after, ok := strings.CutPrefix(trimmed, "- "); ok {
 			if current != nil && inPathPatterns && indent > pathPatternsIndent {
 				current.PathPatterns = append(current.PathPatterns, unquoteScalar(after))
 			}

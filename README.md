@@ -1,13 +1,14 @@
-# nci
+# refci (New CI)
 
-`nci` is a local CI runner for repos you already control.
+`refci` is a local CI runner for repos you already control.
 
 ## Why this exists
+0. [The Pain That is Github Actions](https://news.ycombinator.com/item?id=43419701)
+1. I want to deploy faster
+   - A small build on your machine takes seconds, but minutes up there. (some times takes forever to pick up jobs)
+3. Bash scripts can be simple and reliable when run on a warm, persistent machine.
 
-1. GitHub Actions YAML can be hard to maintain for small, script-driven workflows.
-2. Bash scripts can be simple and reliable when run on a warm, persistent machine.
-
-`nci` keeps the runtime local:
+`refci` keeps the runtime local:
 - no remote queue
 - no fresh clone per run
 - no container startup cost by default
@@ -16,7 +17,7 @@
 
 - Mirrors a GitHub repo locally (`git clone --mirror`)
 - Polls for new branch commits
-- Reads job config from repo `.nci/conf.yml` at `HEAD`
+- Reads job config from repo `.refci/conf.yml` at `HEAD`
 - Runs matching bash scripts in persistent git worktrees
 - Stores job history in sqlite
 - Shows job list/logs in a TUI
@@ -40,52 +41,52 @@ Old repo/settings screens are intentionally removed.
 Install from GitHub:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/dexianta/nci/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/dexianta/refci/main/install.sh | bash
 ```
 
 Install to a custom directory:
 
 ```bash
-NCI_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/dexianta/nci/main/install.sh | bash
+REFCI_INSTALL_DIR="$HOME/bin" curl -fsSL https://raw.githubusercontent.com/dexianta/refci/main/install.sh | bash
 ```
 
 ## Commands
 
 ```bash
-nci init [path]
-nci clone <git-repo-url>
-nci -e <env_file> [-interval 3s] <repo-target>
+refci init [path]
+refci clone <git-repo-url>
+refci -e <env_file> [-interval 3s] <repo-target>
 ```
 
 Notes:
 - `repo-target` can be `owner/repo`, `owner--repo`, or a path under `repos/`.
-- Run from an nci root (the directory containing `nci.db`).
+- Run from a refci root (the directory containing `refci.db`).
 
 ## Quick start
 
 1. Initialize root:
 
 ```bash
-nci init .
+refci init .
 ```
 
 2. Mirror a repo:
 
 ```bash
-nci clone git@github.com:owner/repo.git
+refci clone git@github.com:owner/repo.git
 ```
 
-3. In that repo, commit a `.nci/conf.yml` and scripts, for example:
+3. In that repo, commit a `.refci/conf.yml` and scripts, for example:
 
 ```yaml
 main-test:
   branch_pattern: main
   path_patterns: []
-  script: .nci/main.sh
+  script: .refci/main.sh
 ```
 
 ```bash
-# .nci/main.sh
+# .refci/main.sh
 #!/usr/bin/env bash
 set -euo pipefail
 
@@ -95,10 +96,10 @@ echo "run tests"
 4. Start runner + TUI:
 
 ```bash
-nci -e .env owner/repo
+refci -e .env owner/repo
 ```
 
-## Job config (`.nci/conf.yml`)
+## Job config (`.refci/conf.yml`)
 
 Supported keys per job:
 - `branch_pattern`: exact branch or prefix wildcard (`feature-*`)
@@ -113,7 +114,7 @@ Parser notes:
 
 Per poll cycle:
 1. `git fetch --prune origin` on mirror repo
-2. load latest `.nci/conf.yml` from mirror `HEAD`
+2. load latest `.refci/conf.yml` from mirror `HEAD`
 3. list local branch heads from mirror refs
 4. for each `(job_name, branch)` compare latest recorded SHA
 5. if changed and path filter matches, queue run
@@ -134,11 +135,11 @@ Logs page only:
 - `ESC` or `ENTER` (detail view): back
 - `CTRL+C`: quit
 
-## nci root layout
+## refci root layout
 
 ```text
 <root>/
-  nci.db
+  refci.db
   repos/
     owner--repo/          # bare mirror
   worktrees/

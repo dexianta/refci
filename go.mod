@@ -1,4 +1,4 @@
-module dexianta/nci
+module dexianta/refci
 
 go 1.25.0
 
