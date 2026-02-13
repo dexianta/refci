@@ -23,6 +23,8 @@ type runtimeConfig struct {
 	Env  []string
 }
 
+const appVersion = "0.1"
+
 // - refci init (for init root)
 // - refci clone <git-repo> (this download the code into repos folder)
 // - refci -e <env_path>  <repos/repo_name>  // to start running poll for this one repo
@@ -49,6 +51,9 @@ func run(args []string) error {
 		return runInit(args[1:])
 	case "clone":
 		return runClone(args[1:])
+	case "version":
+		fmt.Println(appVersion)
+		return nil
 	}
 
 	return runPollLoop(args)
@@ -375,7 +380,7 @@ func isHelpArg(v string) bool {
 }
 
 func printMainUsage(w io.Writer) {
-	fmt.Fprintln(w, "refci - local CI runner")
+	fmt.Fprintf(w, "refci v%s - local CI runner\n", appVersion)
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  refci init [path]")
