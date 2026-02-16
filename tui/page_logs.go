@@ -155,6 +155,9 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 		if m.repo == "" {
 			return m, nil, false
 		}
+		if m.mode == logsModeDetail && strings.TrimSpace(m.logPath) != "" {
+			return m, loadJobLogCmd(m.logPath), true
+		}
 		return m, loadRepoJobsCmd(m.dbRepo, m.repo), true
 
 	case tea.KeyMsg:
