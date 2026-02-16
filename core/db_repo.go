@@ -41,6 +41,7 @@ type JobFilter struct {
 	Name   string
 	Branch string
 	Status string
+	Limit  int
 }
 
 type DbRepo interface {

@@ -34,6 +34,7 @@ type logsModel struct {
 
 	statusMsg   string
 	statusInErr bool
+	jobsLoadErr bool
 }
 
 func newLogsModel(dbRepo core.DbRepo, repo string, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) logsModel {
@@ -55,7 +56,7 @@ func (m logsModel) Init() tea.Cmd {
 
 func loadRepoJobsCmd(dbRepo core.DbRepo, repo string) tea.Cmd {
 	return func() tea.Msg {
-		jobs, err := dbRepo.ListJob(core.JobFilter{Repo: repo})
+		jobs, err := dbRepo.ListJob(core.JobFilter{Repo: repo, Limit: 10})
 		return loadRepoJobsMsg{
 			repo: repo,
 			jobs: jobs,
@@ -124,6 +125,7 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 		if mg.err != nil {
 			m.statusInErr = true
 			m.statusMsg = mg.err.Error()
+			m.jobsLoadErr = true
 			return m, nil, true
 		}
 		m.jobs = mg.jobs
@@ -132,6 +134,11 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 		} else if m.selected >= len(m.jobs) {
 			m.selected = len(m.jobs) - 1
 		}
+		if m.jobsLoadErr && m.statusInErr {
+			m.statusMsg = ""
+			m.statusInErr = false
+		}
+		m.jobsLoadErr = false
 		return m, nil, true
 
 	case loadJobLogMsg:

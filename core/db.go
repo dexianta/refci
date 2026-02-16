@@ -38,6 +38,23 @@ func OpenDB(cfg DBConfig) (*sql.DB, error) {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
+	if driverName == "sqlite" {
+		db.SetMaxOpenConns(1)
+		db.SetMaxIdleConns(1)
+		if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("set sqlite busy_timeout: %w", err)
+		}
+		if _, err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("set sqlite journal_mode: %w", err)
+		}
+		if _, err := db.Exec(`PRAGMA synchronous = NORMAL`); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("set sqlite synchronous: %w", err)
+		}
+	}
+
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("ping db: %w", err)

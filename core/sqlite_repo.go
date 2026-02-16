@@ -150,6 +150,10 @@ func (r SQLiteRepo) ListJob(filter JobFilter) ([]Job, error) {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
 	query += " ORDER BY start_at DESC"
+	if filter.Limit > 0 {
+		query += " LIMIT ?"
+		args = append(args, filter.Limit)
+	}
 
 	rows, err := r.db.Query(query, args...)
 	if err != nil {
