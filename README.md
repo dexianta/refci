@@ -90,6 +90,17 @@ Accepted repo target forms (path form recommended):
 - `/abs/path/to/repos/owner--repo`
 - `owner--repo`
 
+Worker lifecycle:
+- `refci` starts the poll loop and job worker in-process.
+- if `refci` exits, job polling/execution stops.
+
+For daemon-style usage, run `refci` in `tmux`:
+
+```bash
+tmux new -d -s refci 'cd /path/to/refci-root && refci -e .env ./repos/<repo-path>'
+tmux attach -t refci
+```
+
 ### 6) Runtime loop
 
 Per interval (default `3s`):
