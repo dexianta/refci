@@ -201,17 +201,19 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			job := m.jobs[m.selected]
-			if strings.ToLower(job.Status) != core.StatusFailed {
+			switch job.Status {
+			case core.StatusFailed, core.StatusCanceled:
+				return m, requestRerunCmd(m.rerunCh, RerunRequest{
+					Repo:   job.Repo,
+					Name:   job.Name,
+					Branch: job.Branch,
+					SHA:    job.SHA,
+				}), true
+			default:
 				m.statusInErr = true
-				m.statusMsg = "select a failed job to restart"
+				m.statusMsg = "select a failed/canceled job to restart"
 				return m, nil, true
 			}
-			return m, requestRerunCmd(m.rerunCh, RerunRequest{
-				Repo:   job.Repo,
-				Name:   job.Name,
-				Branch: job.Branch,
-				SHA:    job.SHA,
-			}), true
 		case "c":
 			if len(m.jobs) == 0 {
 				return m, nil, true
@@ -261,7 +263,7 @@ func (m logsModel) renderJobList() string {
 	lines := make([]string, 0, len(m.jobs))
 	now := time.Now()
 	for i, j := range m.jobs {
-		line := fmt.Sprintf("%-14s  %-14s  %-8s  %-6s  %-7s  %s",
+		line := fmt.Sprintf("%-14s  %-14s  %-8s  %-9s  %-7s  %s",
 			j.Name,
 			j.Branch,
 			shortSHA(j.SHA),
@@ -326,15 +328,15 @@ func shortLogSHA(sha string) string {
 func statusTag(v string) string {
 	switch strings.ToLower(v) {
 	case core.StatusFinished:
-		return "PASS"
+		return "FINISHED"
 	case core.StatusFailed:
-		return "FAIL"
+		return "FAILED"
 	case core.StatusRunning:
-		return "RUN"
+		return "RUNNING"
 	case core.StatusPending:
-		return "WAIT"
+		return "PENDING"
 	case core.StatusCanceled:
-		return "CANC"
+		return "CANCELED"
 	default:
 		return strings.ToUpper(v)
 	}
