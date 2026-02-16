@@ -18,21 +18,23 @@ type topModel struct {
 	now    time.Time
 	repo   string
 
+	statusCh  <-chan StatusEvent
 	logsModel logsModel
 }
 
 type tickMsg time.Time
 
-func newModel(repo string, dbRepo core.DbRepo) topModel {
+func newModel(repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent) topModel {
 	return topModel{
 		now:       time.Now(),
 		repo:      repo,
+		statusCh:  statusCh,
 		logsModel: newLogsModel(dbRepo, repo),
 	}
 }
 
-func Run(ctx context.Context, repo string, dbRepo core.DbRepo) error {
-	p := tea.NewProgram(newModel(repo, dbRepo), tea.WithAltScreen(), tea.WithContext(ctx))
+func Run(ctx context.Context, repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent) error {
+	p := tea.NewProgram(newModel(repo, dbRepo, statusCh), tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
 		return nil
@@ -41,7 +43,7 @@ func Run(ctx context.Context, repo string, dbRepo core.DbRepo) error {
 }
 
 func (m topModel) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), m.logsModel.Init())
+	return tea.Batch(tickCmd(), m.logsModel.Init(), waitStatusCmd(m.statusCh))
 }
 
 func (m topModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -70,9 +72,28 @@ func (m topModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd1 tea.Cmd
 		m.logsModel, cmd1, _ = m.logsModel.Update(msg)
 		return m, tea.Batch(tickCmd(), cmd1)
+	case statusEventMsg:
+		m.logsModel, cmd, _ = m.logsModel.Update(msg)
+		return m, tea.Batch(waitStatusCmd(m.statusCh), cmd)
 	}
 
 	return m, cmd
+}
+
+func waitStatusCmd(statusCh <-chan StatusEvent) tea.Cmd {
+	if statusCh == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		ev, ok := <-statusCh
+		if !ok {
+			return nil
+		}
+		return statusEventMsg{
+			message: ev.Message,
+			inErr:   ev.IsError,
+		}
+	}
 }
 
 func tickCmd() tea.Cmd {

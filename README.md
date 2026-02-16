@@ -104,7 +104,7 @@ Queued run behavior:
 - write stdout/stderr log under `logs/...`
 - update `jobs` row in sqlite
 
-If fetch/config/poll fails, refci exits with an error.
+If fetch/config/poll fails, refci keeps running, shows the error in the TUI, and retries on the next interval.
 
 ### 7) TUI
 

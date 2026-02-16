@@ -23,7 +23,7 @@ type runtimeConfig struct {
 	Env  []string
 }
 
-const appVersion = "0.1"
+const appVersion = "0.2"
 
 // - refci init (for init root)
 // - refci clone <git-repo> (this download the code into repos folder)
@@ -160,41 +160,52 @@ func runPollLoop(args []string) error {
 	uiCtx, cancelUI := context.WithCancel(ctx)
 	defer cancelUI()
 
-	fatalErrCh := make(chan error, 1)
+	statusCh := make(chan tui.StatusEvent, 8)
 	done := make(chan struct{})
-	reportFatal := func(err error) {
-		if err == nil || ctx.Err() != nil {
+	reportStatus := func(msg string, isErr bool) {
+		if ctx.Err() != nil {
 			return
 		}
 		select {
-		case fatalErrCh <- err:
+		case statusCh <- tui.StatusEvent{Message: msg, IsError: isErr}:
 		default:
 		}
-		cancelUI()
-		stop()
 	}
 
 	go func() {
 		defer close(done)
+		defer close(statusCh)
 
 		ticker := time.NewTicker(*interval)
 		defer ticker.Stop()
+		lastErr := ""
+
 		for {
+			var loopErr error
+
 			if err := fetchMirror(ctx, mirrorPath); err != nil {
-				reportFatal(fmt.Errorf("fetch mirror: %w", err))
-				return
+				loopErr = fmt.Errorf("fetch mirror: %w", err)
 			} else {
 				jobs, err := core.LoadJobConfsFromRepo(ctx, cfg.Repo, "HEAD")
 				if err != nil {
-					reportFatal(fmt.Errorf("load .refci/conf.yml: %w", err))
-					return
+					loopErr = fmt.Errorf("load .refci/conf.yml: %w", err)
 				} else if len(jobs) == 0 {
-					reportFatal(fmt.Errorf("no jobs found in .refci/conf.yml for %s", cfg.Repo))
-					return
+					loopErr = fmt.Errorf("no jobs found in .refci/conf.yml for %s", cfg.Repo)
 				} else if err := pollOnce(ctx, dbRepo, runner, cfg, jobs); err != nil {
-					reportFatal(fmt.Errorf("poll failed: %w", err))
-					return
+					loopErr = fmt.Errorf("poll failed: %w", err)
 				}
+			}
+
+			if loopErr != nil {
+				msg := loopErr.Error()
+				if msg != lastErr {
+					reportStatus(msg+" (will retry)", true)
+					lastErr = msg
+				}
+			} else if lastErr != "" {
+				// clear previously shown transient error once poll succeeds again
+				reportStatus("", false)
+				lastErr = ""
 			}
 
 			select {
@@ -205,7 +216,7 @@ func runPollLoop(args []string) error {
 		}
 	}()
 
-	if err := tui.Run(uiCtx, cfg.Repo, dbRepo); err != nil {
+	if err := tui.Run(uiCtx, cfg.Repo, dbRepo, statusCh); err != nil {
 		stop()
 		cancelUI()
 		<-done
@@ -214,12 +225,6 @@ func runPollLoop(args []string) error {
 	stop()
 	cancelUI()
 	<-done
-
-	select {
-	case err := <-fatalErrCh:
-		return err
-	default:
-	}
 	return nil
 }
 

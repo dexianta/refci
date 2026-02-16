@@ -102,6 +102,10 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 		}
 		m.logRows = mg.lines
 		return m, nil, true
+	case statusEventMsg:
+		m.statusInErr = mg.inErr
+		m.statusMsg = strings.TrimSpace(mg.message)
+		return m, nil, true
 
 	case tickMsg:
 		if m.repo == "" {
@@ -168,11 +172,12 @@ func (m logsModel) renderJobList() string {
 	lines := make([]string, 0, len(m.jobs))
 	now := time.Now()
 	for i, j := range m.jobs {
-		line := fmt.Sprintf("%-14s  %-14s  %-8s  %-6s  %s",
+		line := fmt.Sprintf("%-14s  %-14s  %-8s  %-6s  %-7s  %s",
 			j.Name,
 			j.Branch,
 			shortSHA(j.SHA),
 			statusTag(j.Status),
+			elapsedForJob(now, j),
 			timeAgo(now, lastTime(j)),
 		)
 		if i == m.selected {
@@ -270,6 +275,34 @@ func timeAgo(now, t time.Time) string {
 		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	default:
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
+	}
+}
+
+func elapsedForJob(now time.Time, j core.Job) string {
+	if j.Start.IsZero() {
+		return "--"
+	}
+
+	end := j.End
+	if end.IsZero() {
+		end = now
+	}
+	return compactDuration(end.Sub(j.Start))
+}
+
+func compactDuration(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
 }
 
