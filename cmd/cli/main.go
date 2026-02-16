@@ -160,6 +160,8 @@ func runPollLoop(args []string) error {
 	uiCtx, cancelUI := context.WithCancel(ctx)
 	defer cancelUI()
 
+	rerunCh := make(chan tui.RerunRequest, 8)
+	cancelCh := make(chan tui.CancelRequest, 8)
 	statusCh := make(chan tui.StatusEvent, 8)
 	done := make(chan struct{})
 	reportStatus := func(msg string, isErr bool) {
@@ -180,7 +182,7 @@ func runPollLoop(args []string) error {
 		defer ticker.Stop()
 		lastErr := ""
 
-		for {
+		doPoll := func() {
 			var loopErr error
 
 			if err := fetchMirror(ctx, mirrorPath); err != nil {
@@ -207,16 +209,32 @@ func runPollLoop(args []string) error {
 				reportStatus("", false)
 				lastErr = ""
 			}
+		}
 
+		doPoll()
+		for {
 			select {
 			case <-ctx.Done():
 				return
+			case req := <-rerunCh:
+				if err := rerunJob(ctx, runner, cfg, req); err != nil {
+					reportStatus(fmt.Sprintf("restart failed for %s/%s: %v", req.Name, req.Branch, err), true)
+					continue
+				}
+				reportStatus(fmt.Sprintf("restart started for %s/%s", req.Name, req.Branch), false)
+			case req := <-cancelCh:
+				if err := cancelJob(ctx, dbRepo, runner, req); err != nil {
+					reportStatus(fmt.Sprintf("cancel failed for %s/%s@%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err), true)
+					continue
+				}
+				reportStatus(fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)), false)
 			case <-ticker.C:
+				doPoll()
 			}
 		}
 	}()
 
-	if err := tui.Run(uiCtx, cfg.Repo, dbRepo, statusCh); err != nil {
+	if err := tui.Run(uiCtx, cfg.Repo, dbRepo, statusCh, rerunCh, cancelCh); err != nil {
 		stop()
 		cancelUI()
 		<-done
@@ -373,6 +391,148 @@ func pollOnce(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, c
 		}
 	}
 	return nil
+}
+
+func rerunJob(ctx context.Context, runner *core.JobRunner, cfg runtimeConfig, req tui.RerunRequest) error {
+	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Branch) == "" {
+		return errors.New("invalid restart request")
+	}
+
+	jobConfs, err := core.LoadJobConfsFromRepo(ctx, cfg.Repo, "HEAD")
+	if err != nil {
+		return fmt.Errorf("load .refci/conf.yml: %w", err)
+	}
+	jobConf, err := findRerunJobConf(jobConfs, req.Name, req.Branch)
+	if err != nil {
+		return err
+	}
+	jobConf.Repo = cfg.Repo
+
+	if err := runner.RerunJob(jobConf, cfg.Env, req.Branch); err != nil {
+		return err
+	}
+	return nil
+}
+
+func cancelJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, req tui.CancelRequest) error {
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Branch) == "" || strings.TrimSpace(req.SHA) == "" {
+		return errors.New("invalid cancel request")
+	}
+
+	jobRow, err := findJobByKey(dbRepo, strings.TrimSpace(req.Repo), req.Name, req.Branch, req.SHA)
+	if err != nil {
+		return err
+	}
+	status := strings.ToLower(jobRow.Status)
+	if status != core.StatusRunning && status != core.StatusPending {
+		return fmt.Errorf("job status is %q; only running/pending jobs can be canceled", jobRow.Status)
+	}
+
+	if err := runner.Cancel(jobRow.Repo, jobRow.Name, jobRow.Branch, jobRow.SHA); err == nil {
+		return nil
+	} else if status == core.StatusPending && strings.Contains(err.Error(), "job is not running") {
+		if err := dbRepo.UpdateJob(jobRow.Repo, jobRow.Name, jobRow.Branch, jobRow.SHA, core.StatusCanceled, "canceled by user"); err != nil {
+			return err
+		}
+		return nil
+	} else {
+		return err
+	}
+}
+
+func findJobByKey(dbRepo core.DbRepo, repo, name, branch, sha string) (core.Job, error) {
+	repoValue := strings.TrimSpace(repo)
+	nameValue := strings.TrimSpace(name)
+	branchValue := strings.TrimSpace(branch)
+	shaValue := strings.TrimSpace(sha)
+	if repoValue == "" || nameValue == "" || branchValue == "" || shaValue == "" {
+		return core.Job{}, errors.New("job repo/name/branch/sha are required")
+	}
+
+	jobs, err := dbRepo.ListJob(core.JobFilter{
+		Repo:   repoValue,
+		Name:   nameValue,
+		Branch: branchValue,
+	})
+	if err != nil {
+		return core.Job{}, err
+	}
+	for _, j := range jobs {
+		if strings.TrimSpace(j.SHA) == shaValue {
+			return j, nil
+		}
+	}
+	return core.Job{}, fmt.Errorf("job not found: %s/%s@%s", nameValue, branchValue, shortSHA(shaValue))
+}
+
+func findRerunJobConf(jobConfs []core.JobConf, name, branch string) (core.JobConf, error) {
+	nameValue := strings.TrimSpace(name)
+	branchValue := normalizeBranch(branch)
+	if nameValue == "" || branchValue == "" {
+		return core.JobConf{}, errors.New("job name and branch are required")
+	}
+
+	var matched []core.JobConf
+	var sameName []core.JobConf
+	for _, jc := range jobConfs {
+		if strings.TrimSpace(jc.Name) != nameValue {
+			continue
+		}
+		sameName = append(sameName, jc)
+		if branchMatchesForRerun(branchValue, jc.BranchPattern) {
+			matched = append(matched, jc)
+		}
+	}
+
+	if len(matched) == 1 {
+		return matched[0], nil
+	}
+	if len(matched) > 1 {
+		return core.JobConf{}, fmt.Errorf("multiple job configs match %q on branch %q", nameValue, branchValue)
+	}
+	if len(sameName) == 1 {
+		return sameName[0], nil
+	}
+	if len(sameName) > 1 {
+		return core.JobConf{}, fmt.Errorf("multiple job configs share name %q; cannot choose for branch %q", nameValue, branchValue)
+	}
+	return core.JobConf{}, fmt.Errorf("job config %q not found", nameValue)
+}
+
+func branchMatchesForRerun(branch, pattern string) bool {
+	p := normalizeBranch(pattern)
+	if p == "" {
+		p = "*"
+	}
+	if p == "*" {
+		return true
+	}
+	if strings.Contains(p, "*") {
+		// Keep matching behavior aligned with refci polling: only trailing wildcard is supported.
+		if strings.Count(p, "*") != 1 || !strings.HasSuffix(p, "*") {
+			return false
+		}
+		return strings.HasPrefix(branch, strings.TrimSuffix(p, "*"))
+	}
+	return branch == p
+}
+
+func normalizeBranch(v string) string {
+	s := strings.TrimSpace(v)
+	s = strings.TrimPrefix(s, "refs/heads/")
+	s = strings.TrimPrefix(s, "refs/")
+	return s
+}
+
+func shortSHA(sha string) string {
+	s := strings.TrimSpace(sha)
+	if len(s) <= 8 {
+		return s
+	}
+	return s[:8]
 }
 
 func isHelpArg(v string) bool {

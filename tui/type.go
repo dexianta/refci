@@ -7,6 +7,20 @@ type StatusEvent struct {
 	IsError bool
 }
 
+type RerunRequest struct {
+	Repo   string
+	Name   string
+	Branch string
+	SHA    string
+}
+
+type CancelRequest struct {
+	Repo   string
+	Name   string
+	Branch string
+	SHA    string
+}
+
 type loadRepoJobsMsg struct {
 	repo string
 	jobs []core.Job

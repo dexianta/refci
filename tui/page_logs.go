@@ -20,8 +20,10 @@ const (
 )
 
 type logsModel struct {
-	dbRepo core.DbRepo
-	repo   string
+	dbRepo   core.DbRepo
+	repo     string
+	rerunCh  chan<- RerunRequest
+	cancelCh chan<- CancelRequest
 
 	jobs     []core.Job
 	selected int
@@ -34,11 +36,13 @@ type logsModel struct {
 	statusInErr bool
 }
 
-func newLogsModel(dbRepo core.DbRepo, repo string) logsModel {
+func newLogsModel(dbRepo core.DbRepo, repo string, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) logsModel {
 	return logsModel{
-		dbRepo: dbRepo,
-		repo:   repo,
-		mode:   logsModeList,
+		dbRepo:   dbRepo,
+		repo:     repo,
+		rerunCh:  rerunCh,
+		cancelCh: cancelCh,
+		mode:     logsModeList,
 	}
 }
 
@@ -67,6 +71,46 @@ func loadJobLogCmd(path string) tea.Cmd {
 			path:  path,
 			lines: rows,
 			err:   err,
+		}
+	}
+}
+
+func requestRerunCmd(ch chan<- RerunRequest, req RerunRequest) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case ch <- req:
+			return statusEventMsg{
+				message: fmt.Sprintf("restart queued for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)),
+				inErr:   false,
+			}
+		default:
+			return statusEventMsg{
+				message: "restart queue is full, try again",
+				inErr:   true,
+			}
+		}
+	}
+}
+
+func requestCancelCmd(ch chan<- CancelRequest, req CancelRequest) tea.Cmd {
+	if ch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case ch <- req:
+			return statusEventMsg{
+				message: fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)),
+				inErr:   false,
+			}
+		default:
+			return statusEventMsg{
+				message: "cancel queue is full, try again",
+				inErr:   true,
+			}
 		}
 	}
 }
@@ -142,6 +186,39 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 			m.logPath = pathForJob(m.jobs[m.selected])
 			m.logRows = nil
 			return m, loadJobLogCmd(m.logPath), true
+		case "r":
+			if len(m.jobs) == 0 {
+				return m, nil, true
+			}
+			job := m.jobs[m.selected]
+			if strings.ToLower(job.Status) != core.StatusFailed {
+				m.statusInErr = true
+				m.statusMsg = "select a failed job to restart"
+				return m, nil, true
+			}
+			return m, requestRerunCmd(m.rerunCh, RerunRequest{
+				Repo:   job.Repo,
+				Name:   job.Name,
+				Branch: job.Branch,
+				SHA:    job.SHA,
+			}), true
+		case "c":
+			if len(m.jobs) == 0 {
+				return m, nil, true
+			}
+			job := m.jobs[m.selected]
+			status := strings.ToLower(job.Status)
+			if status != core.StatusRunning && status != core.StatusPending {
+				m.statusInErr = true
+				m.statusMsg = "select a running/pending job to cancel"
+				return m, nil, true
+			}
+			return m, requestCancelCmd(m.cancelCh, CancelRequest{
+				Repo:   job.Repo,
+				Name:   job.Name,
+				Branch: job.Branch,
+				SHA:    job.SHA,
+			}), true
 		}
 	}
 
@@ -165,6 +242,8 @@ func (m logsModel) help() string {
 	return footerBarStyle.Render(
 		renderHint("UP/DOWN", "move"),
 		renderHint("ENTER", "open log"),
+		renderHint("R", "restart failed"),
+		renderHint("C", "cancel run"),
 	)
 }
 

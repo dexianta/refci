@@ -24,17 +24,17 @@ type topModel struct {
 
 type tickMsg time.Time
 
-func newModel(repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent) topModel {
+func newModel(repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) topModel {
 	return topModel{
 		now:       time.Now(),
 		repo:      repo,
 		statusCh:  statusCh,
-		logsModel: newLogsModel(dbRepo, repo),
+		logsModel: newLogsModel(dbRepo, repo, rerunCh, cancelCh),
 	}
 }
 
-func Run(ctx context.Context, repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent) error {
-	p := tea.NewProgram(newModel(repo, dbRepo, statusCh), tea.WithAltScreen(), tea.WithContext(ctx))
+func Run(ctx context.Context, repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) error {
+	p := tea.NewProgram(newModel(repo, dbRepo, statusCh, rerunCh, cancelCh), tea.WithAltScreen(), tea.WithContext(ctx))
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
 		return nil

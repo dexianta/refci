@@ -61,13 +61,37 @@ func (j *JobRunner) QueueJob(jobConf JobConf, envs []string, branch, sha string)
 		return nil
 	}
 
-	// sha is new
 	if latestJob.Status == StatusRunning || latestJob.Status == StatusPending {
 		if err = j.Cancel(latestJob.Repo, latestJob.Name, latestJob.Branch, latestJob.SHA); err != nil {
 			return err
 		}
 	}
 
+	return j.runJobAtSHA(jobConf, envs, branch, sha)
+}
+
+func (j *JobRunner) RerunJob(jobConf JobConf, envs []string, branch string) error {
+	name := jobConf.Name
+	if name == "" {
+		return fmt.Errorf("job name is required")
+	}
+
+	latestJob, err := j.dbRepo.LatestJobByNameBranch(jobConf.Repo, name, branch)
+	if err != nil {
+		return err
+	}
+	if latestJob.SHA == "" {
+		return fmt.Errorf("no previous job found for %s/%s", name, branch)
+	}
+	if strings.ToLower(strings.TrimSpace(latestJob.Status)) != StatusFailed {
+		return fmt.Errorf("latest job status is %q; only failed jobs can be rerun", latestJob.Status)
+	}
+
+	return j.runJobAtSHA(jobConf, envs, branch, latestJob.SHA)
+}
+
+func (j *JobRunner) runJobAtSHA(jobConf JobConf, envs []string, branch, sha string) error {
+	name := jobConf.Name
 	workDir, err := EnsureWorktree(context.Background(), jobConf.Repo, branch, sha)
 	if err != nil {
 		return err

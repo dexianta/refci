@@ -112,5 +112,7 @@ If fetch/config/poll fails, refci keeps running, shows the error in the TUI, and
 Single logs page:
 - `UP/DOWN`: select job
 - `ENTER`: open log detail
+- `R`: rerun when the latest attempt for that job/branch is failed
+- `C`: cancel selected running/pending job
 - `ESC` or `ENTER` (detail): back
 - `CTRL+C`: quit

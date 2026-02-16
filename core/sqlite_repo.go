@@ -86,7 +86,11 @@ func (r SQLiteRepo) CreateJob(repo, name, branch, sha string) error {
 	_, err := r.db.Exec(
 		`INSERT INTO jobs (repo, name, branch, sha, start_at, status, msg)
 		 VALUES (?, ?, ?, ?, ?, ?, '')
-		 ON CONFLICT(repo, name, branch, sha) DO NOTHING`,
+		 ON CONFLICT(repo, name, branch, sha) DO UPDATE SET
+		     start_at = excluded.start_at,
+		     end_at = NULL,
+		     status = excluded.status,
+		     msg = excluded.msg`,
 		repo, name, branch, sha, now, StatusPending,
 	)
 	if err != nil {
