@@ -7,6 +7,7 @@
 - [The Pain That is Github Actions](https://news.ycombinator.com/item?id=43419701)
 - GitHub Actions YAML can be painful for small, branch/script-driven pipelines.
 - A local, warm runtime is often faster and simpler than remote CI startup overhead.
+  - especially coding agent can help you write these bash scripts nowadays, wouldn't you want something you can test more easily locally?
 - I can't count the times that it takes absurd amount of time for the queue to pick up a job..
 
 ## How it works
