@@ -23,7 +23,7 @@ type runtimeConfig struct {
 	Env  []string
 }
 
-const appVersion = "0.4.1"
+const appVersion = "0.5"
 
 // - refci init (for init root)
 // - refci clone <git-repo> (this download the code into repos folder)
@@ -120,6 +120,7 @@ func runPollLoop(args []string) error {
 	fs.SetOutput(io.Discard)
 	envPath := fs.String("e", ".env", "env file path")
 	interval := fs.Duration("interval", 3*time.Second, "poll interval")
+	noFetch := fs.Bool("no-fetch", false, "disable automatic fetch/poll loop (manual restart/cancel still available)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			printPollUsage(os.Stdout)
@@ -148,11 +149,14 @@ func runPollLoop(args []string) error {
 	if err != nil {
 		return err
 	}
-	runner := core.NewJobRunner(dbRepo)
 
-	cfg, err := parseRuntimeConfig(repo, *envPath)
-	if err != nil {
-		return err
+	cfg := runtimeConfig{Repo: repo}
+	runner := core.NewJobRunner(dbRepo)
+	if !*noFetch {
+		cfg, err = parseRuntimeConfig(repo, *envPath)
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -164,6 +168,7 @@ func runPollLoop(args []string) error {
 	cancelCh := make(chan tui.CancelRequest, 8)
 	statusCh := make(chan tui.StatusEvent, 8)
 	done := make(chan struct{})
+
 	reportStatus := func(msg string, isErr bool) {
 		if ctx.Err() != nil {
 			return
@@ -178,40 +183,47 @@ func runPollLoop(args []string) error {
 		defer close(done)
 		defer close(statusCh)
 
-		ticker := time.NewTicker(*interval)
-		defer ticker.Stop()
+		doPoll := func() {}
+		var ticker *time.Ticker
+		var tickerCh <-chan time.Time
 		lastErr := ""
 
-		doPoll := func() {
-			var loopErr error
+		if !*noFetch {
+			doPoll = func() {
+				var loopErr error
 
-			if err := fetchMirror(ctx, mirrorPath); err != nil {
-				loopErr = fmt.Errorf("fetch mirror: %w", err)
-			} else {
-				jobs, err := core.LoadJobConfsFromRepo(ctx, cfg.Repo, "HEAD")
-				if err != nil {
-					loopErr = fmt.Errorf("load .refci/conf.yml: %w", err)
-				} else if len(jobs) == 0 {
-					loopErr = fmt.Errorf("no jobs found in .refci/conf.yml for %s", cfg.Repo)
-				} else if err := pollOnce(ctx, dbRepo, runner, cfg, jobs); err != nil {
-					loopErr = fmt.Errorf("poll failed: %w", err)
+				if err := fetchMirror(ctx, mirrorPath); err != nil {
+					loopErr = fmt.Errorf("fetch mirror: %w", err)
+				} else {
+					jobs, err := core.LoadJobConfsFromRepo(ctx, cfg.Repo, "HEAD")
+					if err != nil {
+						loopErr = fmt.Errorf("load .refci/conf.yml: %w", err)
+					} else if len(jobs) == 0 {
+						loopErr = fmt.Errorf("no jobs found in .refci/conf.yml for %s", cfg.Repo)
+					} else if err := pollOnce(ctx, dbRepo, runner, cfg, jobs); err != nil {
+						loopErr = fmt.Errorf("poll failed: %w", err)
+					}
+				}
+
+				if loopErr != nil {
+					msg := loopErr.Error()
+					if msg != lastErr {
+						reportStatus(msg+" (will retry)", true)
+						lastErr = msg
+					}
+				} else if lastErr != "" {
+					// clear previously shown transient error once poll succeeds again
+					reportStatus("", false)
+					lastErr = ""
 				}
 			}
 
-			if loopErr != nil {
-				msg := loopErr.Error()
-				if msg != lastErr {
-					reportStatus(msg+" (will retry)", true)
-					lastErr = msg
-				}
-			} else if lastErr != "" {
-				// clear previously shown transient error once poll succeeds again
-				reportStatus("", false)
-				lastErr = ""
-			}
+			doPoll()
+			ticker = time.NewTicker(*interval)
+			tickerCh = ticker.C
+			defer ticker.Stop()
 		}
 
-		doPoll()
 		for {
 			select {
 			case <-ctx.Done():
@@ -228,7 +240,7 @@ func runPollLoop(args []string) error {
 					continue
 				}
 				reportStatus(fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)), false)
-			case <-ticker.C:
+			case <-tickerCh:
 				doPoll()
 			}
 		}
@@ -551,6 +563,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "  refci init [path]")
 	fmt.Fprintln(w, "  refci clone <git-repo-url>")
 	fmt.Fprintln(w, "  refci -e <env_file> [-interval 3s] <repo-target>")
+	fmt.Fprintln(w, "  refci --no-fetch <repo-target>")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Repo target:")
 	fmt.Fprintln(w, "  owner/repo | owner--repo | repos/owner--repo | /abs/path/to/repos/owner--repo")
@@ -559,6 +572,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "  refci init .")
 	fmt.Fprintln(w, "  refci clone git@github.com:owner/repo.git")
 	fmt.Fprintln(w, "  refci -e .env owner/repo")
+	fmt.Fprintln(w, "  refci --no-fetch owner/repo")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Help:")
 	fmt.Fprintln(w, "  refci --help")
@@ -578,12 +592,15 @@ func printCloneUsage(w io.Writer) {
 
 func printPollUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: refci -e <env_file> [-interval 3s] <repo-target>")
+	fmt.Fprintln(w, "       refci --no-fetch <repo-target>")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  -e string")
 	fmt.Fprintln(w, "      env file path (default \".env\")")
 	fmt.Fprintln(w, "  -interval duration")
 	fmt.Fprintln(w, "      poll interval (default 3s)")
+	fmt.Fprintln(w, "  --no-fetch")
+	fmt.Fprintln(w, "      monitor mode (no automatic fetch/poll; manual restart/cancel only; no env file required)")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Repo target:")
 	fmt.Fprintln(w, "  owner/repo | owner--repo | repos/owner--repo | /abs/path/to/repos/owner--repo")

@@ -70,6 +70,12 @@ From the refci root, run with the repo path:
 refci -e .env ./repos/<repo-path>
 ```
 
+Disable automatic fetch/poll (manual `R`/`C` in TUI still works, and no `.env` is required):
+
+```bash
+refci --no-fetch ./repos/<repo-path>
+```
+
 `.env` file format:
 - one variable per line: `KEY=value`
 - optional `export` prefix: `export KEY=value`

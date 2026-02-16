@@ -201,19 +201,17 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			job := m.jobs[m.selected]
-			switch job.Status {
-			case core.StatusFailed, core.StatusCanceled:
-				return m, requestRerunCmd(m.rerunCh, RerunRequest{
-					Repo:   job.Repo,
-					Name:   job.Name,
-					Branch: job.Branch,
-					SHA:    job.SHA,
-				}), true
-			default:
+			if strings.ToLower(job.Status) != core.StatusFailed {
 				m.statusInErr = true
-				m.statusMsg = "select a failed/canceled job to restart"
+				m.statusMsg = "select a failed job to restart"
 				return m, nil, true
 			}
+			return m, requestRerunCmd(m.rerunCh, RerunRequest{
+				Repo:   job.Repo,
+				Name:   job.Name,
+				Branch: job.Branch,
+				SHA:    job.SHA,
+			}), true
 		case "c":
 			if len(m.jobs) == 0 {
 				return m, nil, true
@@ -251,19 +249,20 @@ func (m logsModel) help() string {
 		)
 	}
 
-	return footerBarStyle.Render(
+	hints := []string{
 		renderHint("UP/DOWN", "move"),
 		renderHint("ENTER", "open log"),
 		renderHint("R", "restart failed"),
 		renderHint("C", "cancel run"),
-	)
+	}
+	return footerBarStyle.Render(hints...)
 }
 
 func (m logsModel) renderJobList() string {
 	lines := make([]string, 0, len(m.jobs))
 	now := time.Now()
 	for i, j := range m.jobs {
-		line := fmt.Sprintf("%-14s  %-14s  %-8s  %-9s  %-7s  %s",
+		line := fmt.Sprintf("%-24s  %-14s  %-8s  %-9s  %-7s  %s",
 			j.Name,
 			j.Branch,
 			shortSHA(j.SHA),
