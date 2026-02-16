@@ -120,7 +120,7 @@ func runPollLoop(args []string) error {
 	fs.SetOutput(io.Discard)
 	envPath := fs.String("e", ".env", "env file path")
 	interval := fs.Duration("interval", 3*time.Second, "poll interval")
-	noFetch := fs.Bool("no-fetch", false, "disable automatic fetch/poll loop (manual restart/cancel still available)")
+	monitorMode := fs.Bool("monitor", false, "monitor only (no automatic fetch/poll; manual restart/cancel still available)")
 	if err := fs.Parse(args); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
 			printPollUsage(os.Stdout)
@@ -152,7 +152,7 @@ func runPollLoop(args []string) error {
 
 	cfg := runtimeConfig{Repo: repo}
 	runner := core.NewJobRunner(dbRepo)
-	if !*noFetch {
+	if !*monitorMode {
 		cfg, err = parseRuntimeConfig(repo, *envPath)
 		if err != nil {
 			return err
@@ -188,7 +188,7 @@ func runPollLoop(args []string) error {
 		var tickerCh <-chan time.Time
 		lastErr := ""
 
-		if !*noFetch {
+		if !*monitorMode {
 			doPoll = func() {
 				var loopErr error
 
@@ -563,7 +563,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "  refci init [path]")
 	fmt.Fprintln(w, "  refci clone <git-repo-url>")
 	fmt.Fprintln(w, "  refci -e <env_file> [-interval 3s] <repo-target>")
-	fmt.Fprintln(w, "  refci --no-fetch <repo-target>")
+	fmt.Fprintln(w, "  refci --monitor <repo-target>")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Repo target:")
 	fmt.Fprintln(w, "  owner/repo | owner--repo | repos/owner--repo | /abs/path/to/repos/owner--repo")
@@ -572,7 +572,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "  refci init .")
 	fmt.Fprintln(w, "  refci clone git@github.com:owner/repo.git")
 	fmt.Fprintln(w, "  refci -e .env owner/repo")
-	fmt.Fprintln(w, "  refci --no-fetch owner/repo")
+	fmt.Fprintln(w, "  refci --monitor owner/repo")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Help:")
 	fmt.Fprintln(w, "  refci --help")
@@ -592,14 +592,14 @@ func printCloneUsage(w io.Writer) {
 
 func printPollUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: refci -e <env_file> [-interval 3s] <repo-target>")
-	fmt.Fprintln(w, "       refci --no-fetch <repo-target>")
+	fmt.Fprintln(w, "       refci --monitor <repo-target>")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  -e string")
 	fmt.Fprintln(w, "      env file path (default \".env\")")
 	fmt.Fprintln(w, "  -interval duration")
 	fmt.Fprintln(w, "      poll interval (default 3s)")
-	fmt.Fprintln(w, "  --no-fetch")
+	fmt.Fprintln(w, "  --monitor")
 	fmt.Fprintln(w, "      monitor mode (no automatic fetch/poll; manual restart/cancel only; no env file required)")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Repo target:")

@@ -73,7 +73,7 @@ refci -e .env ./repos/<repo-path>
 Disable automatic fetch/poll (manual `R`/`C` in TUI still works, and no `.env` is required):
 
 ```bash
-refci --no-fetch ./repos/<repo-path>
+refci --monitor ./repos/<repo-path>
 ```
 
 `.env` file format:
