@@ -268,7 +268,7 @@ func (m logsModel) renderJobList() string {
 			shortSHA(j.SHA),
 			statusTag(j.Status),
 			elapsedForJob(now, j),
-			timeAgo(now, lastTime(j)),
+			timeAgo(now, j.Start),
 		)
 		if i == m.selected {
 			lines = append(lines, selectedItemStyle.Render("> "+line))
@@ -339,13 +339,6 @@ func statusTag(v string) string {
 	default:
 		return strings.ToUpper(v)
 	}
-}
-
-func lastTime(j core.Job) time.Time {
-	if !j.End.IsZero() {
-		return j.End
-	}
-	return j.Start
 }
 
 func timeAgo(now, t time.Time) string {
