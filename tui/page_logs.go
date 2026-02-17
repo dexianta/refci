@@ -392,9 +392,13 @@ func compactDuration(d time.Duration) string {
 	case d < time.Minute:
 		return fmt.Sprintf("%ds", int(d.Seconds()))
 	case d < time.Hour:
-		return fmt.Sprintf("%dm", int(d.Minutes()))
+		m := d / time.Minute
+		s := d % time.Minute / time.Second
+		return fmt.Sprintf("%dm%ds", m, s)
 	case d < 24*time.Hour:
-		return fmt.Sprintf("%dh", int(d.Hours()))
+		h := d / time.Hour
+		m := d % time.Hour / time.Minute
+		return fmt.Sprintf("%dh%dm", h, m)
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
