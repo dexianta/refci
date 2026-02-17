@@ -23,7 +23,7 @@ type runtimeConfig struct {
 	Env  []string
 }
 
-const appVersion = "0.5.1"
+const appVersion = "0.5.2"
 
 // - refci init (for init root)
 // - refci clone <git-repo> (this download the code into repos folder)

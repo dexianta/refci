@@ -252,8 +252,8 @@ func (m logsModel) help() string {
 	hints := []string{
 		renderHint("UP/DOWN", "move"),
 		renderHint("ENTER", "open log"),
-		renderHint("R", "restart failed"),
-		renderHint("C", "cancel run"),
+		renderHint("R", "restart"),
+		renderHint("C", "cancel"),
 	}
 	return footerBarStyle.Render(hints...)
 }
