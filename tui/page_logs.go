@@ -360,13 +360,9 @@ func timeAgo(now, t time.Time) string {
 	case d < time.Minute:
 		return fmt.Sprintf("%ds ago", int(d.Seconds()))
 	case d < time.Hour:
-		m := (d / time.Second / 60)
-		s := (d % time.Minute) / time.Second
-		return fmt.Sprintf("%dm%ds ago", m, s)
+		return fmt.Sprintf("%dm ago", int(d.Minutes()))
 	case d < 24*time.Hour:
-		h := d / time.Hour
-		m := (d % time.Hour) / time.Minute
-		return fmt.Sprintf("%dh%dm ago", h, m)
+		return fmt.Sprintf("%dh ago", int(d.Hours()))
 	default:
 		return fmt.Sprintf("%dd ago", int(d.Hours()/24))
 	}
