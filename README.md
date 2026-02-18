@@ -2,6 +2,12 @@
 
 `refci` is a local CI runner for script-first workflows.
 
+## TUI Preview
+
+| Job list view | Log detail view |
+| --- | --- |
+| ![Job list view](docs/screen-1.png) | ![Log detail view](docs/screen-2.png) |
+
 ## Why this exists
 
 - [The Pain That is Github Actions](https://news.ycombinator.com/item?id=43419701)
@@ -126,14 +132,10 @@ If fetch/config/poll fails, refci keeps running, shows the error in the TUI, and
 
 ### 7) TUI
 
-Screenshots:
-- [Job list view](docs/screen-1.png)
-- [Log detail view](docs/screen-2.png)
-
 Single logs page:
 - shows latest 10 jobs (most recent first)
 - `UP/DOWN`: select job
-- `ENTER`: open log detail
+- `ENTER`: open log detail (stream the last 200 line of the file each second)
 - `R`: rerun when the latest attempt for that job/branch is failed
 - `C`: cancel selected running/pending job
 - `ESC` or `ENTER` (detail): back
