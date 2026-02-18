@@ -126,6 +126,10 @@ If fetch/config/poll fails, refci keeps running, shows the error in the TUI, and
 
 ### 7) TUI
 
+Screenshots:
+- [Job list view](docs/screen-1.png)
+- [Log detail view](docs/screen-2.png)
+
 Single logs page:
 - shows latest 10 jobs (most recent first)
 - `UP/DOWN`: select job
