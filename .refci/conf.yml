@@ -1,0 +1,4 @@
+hello:
+  branch_pattern: main
+  path_patterns: [] 
+  script: .refci/hello.sh
