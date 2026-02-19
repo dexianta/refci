@@ -3,6 +3,7 @@ package tui
 import (
 	"dexianta/refci/core"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
 	"strings"
@@ -258,18 +259,37 @@ func (m logsModel) help() string {
 	return footerBarStyle.Render(hints...)
 }
 
+const (
+	actionNameColWidth = 24
+	branchColWidth     = 14
+	shaColWidth        = 8
+	statusColWidth     = 9
+	elapsedColWidth    = 7
+)
+
+var actionNamePalette = []lipgloss.Color{
+	"38", "44", "45", "50", "74", "81", "117", "149", "178", "179", "208", "214",
+}
+
 func (m logsModel) renderJobList() string {
 	lines := make([]string, 0, len(m.jobs))
 	now := time.Now()
 	for i, j := range m.jobs {
-		line := fmt.Sprintf("%-24s  %-14s  %-8s  %-9s  %-7s  %s",
-			j.Name,
-			j.Branch,
-			shortSHA(j.SHA),
-			statusTag(j.Status),
-			elapsedForJob(now, j),
+		nameCell := renderActionName(j.Name, actionNameColWidth)
+		branchCell := fixedCell(j.Branch, branchColWidth)
+		shaCell := fixedCell(shortSHA(j.SHA), shaColWidth)
+		statusCell := fixedCell(statusTag(j.Status), statusColWidth)
+		elapsedCell := fixedCell(elapsedForJob(now, j), elapsedColWidth)
+
+		line := strings.Join([]string{
+			nameCell,
+			branchCell,
+			shaCell,
+			statusCell,
+			elapsedCell,
 			timeAgo(now, j.Start),
-		)
+		}, "  ")
+
 		if i == m.selected {
 			lines = append(lines, selectedItemStyle.Render("> "+line))
 		} else {
@@ -292,6 +312,42 @@ func (m logsModel) renderJobList() string {
 	return renderRegion("Jobs", []string{strings.Join(lines, "\n")}, help, true)
 }
 
+func renderActionName(name string, width int) string {
+	cell := fixedCell(name, width)
+	if strings.TrimSpace(name) == "" {
+		return cell
+	}
+	return actionNameStyle(name).Render(cell)
+}
+
+func actionNameStyle(name string) lipgloss.Style {
+	if len(actionNamePalette) == 0 {
+		return lipgloss.NewStyle().Bold(true)
+	}
+	idx := actionNameColorIndex(name)
+	return lipgloss.NewStyle().Foreground(actionNamePalette[idx]).Bold(true)
+}
+
+func actionNameColorIndex(name string) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(name))))
+	return int(h.Sum32() % uint32(len(actionNamePalette)))
+}
+
+func fixedCell(v string, width int) string {
+	if width <= 0 {
+		return strings.TrimSpace(v)
+	}
+	r := []rune(strings.TrimSpace(v))
+	if len(r) > width {
+		r = r[:width]
+	}
+	s := string(r)
+	if pad := width - len(r); pad > 0 {
+		s += strings.Repeat(" ", pad)
+	}
+	return s
+}
 func (m logsModel) renderLogDetail() string {
 	header := sectionTitleStyle.Render("Log Detail")
 	meta := mutedStyle.Render(fmt.Sprintf("path=%s", m.logPath))
