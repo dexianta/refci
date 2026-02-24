@@ -15,13 +15,14 @@ import (
 )
 
 type RunJobRequest struct {
-	Repo       string
-	Name       string
-	Branch     string
-	SHA        string
-	ScriptPath string
-	WorkDir    string
-	Env        []string
+	Repo         string
+	Name         string
+	Branch       string
+	SHA          string
+	CommitAuthor string
+	ScriptPath   string
+	WorkDir      string
+	Env          []string
 }
 
 type JobRunner struct {
@@ -101,14 +102,20 @@ func (j *JobRunner) runJobAtSHA(jobConf JobConf, envs []string, branch, sha stri
 		return fmt.Errorf("script not found: %s", scriptPath)
 	}
 
+	commitAuthor, err := CommitAuthorAtSHA(context.Background(), jobConf.Repo, sha)
+	if err != nil {
+		commitAuthor = ""
+	}
+
 	if _, err = j.Start(context.Background(), RunJobRequest{
-		Repo:       jobConf.Repo,
-		Name:       name,
-		Branch:     branch,
-		SHA:        sha,
-		ScriptPath: scriptPath,
-		WorkDir:    workDir,
-		Env:        envs,
+		Repo:         jobConf.Repo,
+		Name:         name,
+		Branch:       branch,
+		SHA:          sha,
+		CommitAuthor: commitAuthor,
+		ScriptPath:   scriptPath,
+		WorkDir:      workDir,
+		Env:          envs,
 	}); err != nil {
 		return err
 	}
@@ -125,7 +132,7 @@ func (r *JobRunner) Start(ctx context.Context, req RunJobRequest) (string, error
 	}
 	r.mu.Unlock()
 
-	if err := r.dbRepo.CreateJob(req.Repo, req.Name, req.Branch, req.SHA); err != nil {
+	if err := r.dbRepo.CreateJob(req.Repo, req.Name, req.Branch, req.SHA, req.CommitAuthor); err != nil {
 		return "", fmt.Errorf("create job row: %w", err)
 	}
 

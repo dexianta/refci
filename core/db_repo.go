@@ -18,14 +18,15 @@ type GlobalSetting struct {
 }
 
 type Job struct {
-	Repo   string
-	Name   string
-	Branch string
-	SHA    string
-	Start  time.Time
-	End    time.Time
-	Status string
-	Msg    string
+	Repo         string
+	Name         string
+	Branch       string
+	SHA          string
+	CommitAuthor string
+	Start        time.Time
+	End          time.Time
+	Status       string
+	Msg          string
 }
 
 var (
@@ -46,7 +47,7 @@ type JobFilter struct {
 
 type DbRepo interface {
 	LatestJobByNameBranch(repo, name, branch string) (Job, error)
-	CreateJob(repo, name, branch, sha string) error
+	CreateJob(repo, name, branch, sha, commitAuthor string) error
 	UpdateJob(repo, name, branch, sha, status, msg string) error // for cancel, or finish etc
 	ListJob(filter JobFilter) ([]Job, error)
 }

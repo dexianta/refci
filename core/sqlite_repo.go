@@ -29,6 +29,7 @@ func (r SQLiteRepo) ensureSchema() error {
 			name TEXT NOT NULL,
 			branch TEXT NOT NULL,
 			sha TEXT NOT NULL,
+			commit_author TEXT NOT NULL DEFAULT '',
 			start_at TEXT NOT NULL,
 			end_at TEXT,
 			status TEXT NOT NULL,
@@ -44,6 +45,45 @@ func (r SQLiteRepo) ensureSchema() error {
 			return fmt.Errorf("ensure schema: %w", err)
 		}
 	}
+
+	if err := r.ensureJobsColumn("commit_author", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (r SQLiteRepo) ensureJobsColumn(name, spec string) error {
+	rows, err := r.db.Query(`PRAGMA table_info(jobs)`)
+	if err != nil {
+		return fmt.Errorf("list jobs columns: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var (
+			cid        int
+			columnName string
+			columnType string
+			notNull    int
+			defaultVal sql.NullString
+			pk         int
+		)
+		if err := rows.Scan(&cid, &columnName, &columnType, &notNull, &defaultVal, &pk); err != nil {
+			return fmt.Errorf("scan jobs column: %w", err)
+		}
+		if strings.EqualFold(strings.TrimSpace(columnName), strings.TrimSpace(name)) {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate jobs columns: %w", err)
+	}
+
+	alter := fmt.Sprintf(`ALTER TABLE jobs ADD COLUMN %s %s`, name, spec)
+	if _, err := r.db.Exec(alter); err != nil {
+		return fmt.Errorf("add jobs.%s: %w", name, err)
+	}
 	return nil
 }
 
@@ -54,13 +94,13 @@ func (r SQLiteRepo) LatestJobByNameBranch(repo, name, branch string) (Job, error
 		endAt   sql.NullString
 	)
 	err := r.db.QueryRow(
-		`SELECT repo, name, branch, sha, start_at, end_at, status, msg
+		`SELECT repo, name, branch, sha, commit_author, start_at, end_at, status, msg
 		 FROM jobs
 		 WHERE repo = ? AND name = ? AND branch = ?
 		 ORDER BY start_at DESC
 		 LIMIT 1`,
 		repo, name, branch,
-	).Scan(&j.Repo, &j.Name, &j.Branch, &j.SHA, &startAt, &endAt, &j.Status, &j.Msg)
+	).Scan(&j.Repo, &j.Name, &j.Branch, &j.SHA, &j.CommitAuthor, &startAt, &endAt, &j.Status, &j.Msg)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return Job{}, nil
@@ -81,17 +121,18 @@ func (r SQLiteRepo) LatestJobByNameBranch(repo, name, branch string) (Job, error
 	return j, nil
 }
 
-func (r SQLiteRepo) CreateJob(repo, name, branch, sha string) error {
+func (r SQLiteRepo) CreateJob(repo, name, branch, sha, commitAuthor string) error {
 	now := formatStoredTime(time.Now().UTC())
 	_, err := r.db.Exec(
-		`INSERT INTO jobs (repo, name, branch, sha, start_at, status, msg)
-		 VALUES (?, ?, ?, ?, ?, ?, '')
+		`INSERT INTO jobs (repo, name, branch, sha, commit_author, start_at, status, msg)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, '')
 		 ON CONFLICT(repo, name, branch, sha) DO UPDATE SET
+		     commit_author = excluded.commit_author,
 		     start_at = excluded.start_at,
 		     end_at = NULL,
 		     status = excluded.status,
 		     msg = excluded.msg`,
-		repo, name, branch, sha, now, StatusPending,
+		repo, name, branch, sha, strings.TrimSpace(commitAuthor), now, StatusPending,
 	)
 	if err != nil {
 		return fmt.Errorf("create job: %w", err)
@@ -145,7 +186,7 @@ func (r SQLiteRepo) ListJob(filter JobFilter) ([]Job, error) {
 		args = append(args, filter.Status)
 	}
 
-	query := `SELECT repo, name, branch, sha, start_at, end_at, status, msg FROM jobs`
+	query := `SELECT repo, name, branch, sha, commit_author, start_at, end_at, status, msg FROM jobs`
 	if len(where) > 0 {
 		query += " WHERE " + strings.Join(where, " AND ")
 	}
@@ -168,7 +209,7 @@ func (r SQLiteRepo) ListJob(filter JobFilter) ([]Job, error) {
 			startAt string
 			endAt   sql.NullString
 		)
-		if err := rows.Scan(&j.Repo, &j.Name, &j.Branch, &j.SHA, &startAt, &endAt, &j.Status, &j.Msg); err != nil {
+		if err := rows.Scan(&j.Repo, &j.Name, &j.Branch, &j.SHA, &j.CommitAuthor, &startAt, &endAt, &j.Status, &j.Msg); err != nil {
 			return nil, fmt.Errorf("scan job: %w", err)
 		}
 		j.Start, err = parseStoredTime(startAt)

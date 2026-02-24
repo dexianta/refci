@@ -133,7 +133,7 @@ If fetch/config/poll fails, refci keeps running, shows the error in the TUI, and
 ### 7) TUI
 
 Single logs page:
-- shows latest 10 jobs (most recent first)
+- shows latest 10 jobs (most recent first), including commit author
 - `UP/DOWN`: select job
 - `ENTER`: open log detail (stream the last 200 line of the file each second)
 - `R`: rerun when the latest attempt for that job/branch is failed

@@ -185,6 +185,24 @@ func LoadJobConfsFromRepo(ctx context.Context, repo, ref string) ([]JobConf, err
 	return confs, nil
 }
 
+func CommitAuthorAtSHA(ctx context.Context, repo, sha string) (string, error) {
+	repoName := strings.TrimSpace(repo)
+	if repoName == "" {
+		return "", fmt.Errorf("repo is required")
+	}
+	shaValue := strings.TrimSpace(sha)
+	if shaValue == "" {
+		return "", fmt.Errorf("sha is required")
+	}
+
+	mirrorPath := filepath.Join(Root, "repos", ToLocalRepo(repoName))
+	out, err := runGitOutput(ctx, mirrorPath, "show", "-s", "--format=%an", shaValue)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
 func ListChangedFiles(ctx context.Context, repo, oldSHA, newSHA string) ([]string, error) {
 	if repo == "" {
 		return nil, fmt.Errorf("repo is required")

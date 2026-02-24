@@ -260,9 +260,10 @@ func (m logsModel) help() string {
 }
 
 const (
-	actionNameColWidth = 24
-	branchColWidth     = 14
+	actionNameColWidth = 22
+	branchColWidth     = 12
 	shaColWidth        = 8
+	authorColWidth     = 14
 	statusColWidth     = 9
 	elapsedColWidth    = 7
 )
@@ -278,6 +279,7 @@ func (m logsModel) renderJobList() string {
 		nameCell := renderActionName(j.Name, actionNameColWidth)
 		branchCell := fixedCell(j.Branch, branchColWidth)
 		shaCell := fixedCell(shortSHA(j.SHA), shaColWidth)
+		authorCell := fixedCell(displayCommitAuthor(j.CommitAuthor), authorColWidth)
 		statusCell := fixedCell(statusTag(j.Status), statusColWidth)
 		elapsedCell := fixedCell(elapsedForJob(now, j), elapsedColWidth)
 
@@ -285,6 +287,7 @@ func (m logsModel) renderJobList() string {
 			nameCell,
 			branchCell,
 			shaCell,
+			authorCell,
 			statusCell,
 			elapsedCell,
 			timeAgo(now, j.Start),
@@ -332,6 +335,14 @@ func actionNameColorIndex(name string) int {
 	h := fnv.New32a()
 	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(name))))
 	return int(h.Sum32() % uint32(len(actionNamePalette)))
+}
+
+func displayCommitAuthor(v string) string {
+	author := strings.TrimSpace(v)
+	if author == "" {
+		return "-"
+	}
+	return author
 }
 
 func fixedCell(v string, width int) string {
