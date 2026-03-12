@@ -185,6 +185,14 @@ func runPollLoop(args []string) error {
 		}
 	}
 
+	staleCount, err := markRepoJobsCanceled(dbRepo, cfg.Repo, "worker restarted before job completion", ciLogger.Logf)
+	if err != nil {
+		return err
+	}
+	if staleCount > 0 {
+		reportStatus(fmt.Sprintf("marked %d stale jobs as canceled", staleCount), false)
+	}
+
 	modeLabel := "poll"
 	if *monitorMode {
 		modeLabel = "monitor"
@@ -256,6 +264,11 @@ func runPollLoop(args []string) error {
 		for {
 			select {
 			case <-ctx.Done():
+				if count, err := markRepoJobsCanceled(dbRepo, cfg.Repo, "worker stopped before job completion", ciLogger.Logf); err != nil {
+					ciLogger.Logf("worker stop cleanup failed: %v", err)
+				} else if count > 0 {
+					ciLogger.Logf("worker stop cleanup marked=%d", count)
+				}
 				ciLogger.Logf("worker stop")
 				return
 			case req := <-rerunCh:
@@ -530,14 +543,44 @@ func cancelJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, 
 
 	if err := runner.Cancel(jobRow.Repo, jobRow.Name, jobRow.Branch, jobRow.SHA); err == nil {
 		return nil
-	} else if status == core.StatusPending && strings.Contains(err.Error(), "job is not running") {
-		if err := dbRepo.UpdateJob(jobRow.Repo, jobRow.Name, jobRow.Branch, jobRow.SHA, core.StatusCanceled, "canceled by user"); err != nil {
+	} else if strings.Contains(err.Error(), "job is not running") {
+		if err := dbRepo.UpdateJob(jobRow.Repo, jobRow.Name, jobRow.Branch, jobRow.SHA, core.StatusCanceled, "canceled by user (stale job state)"); err != nil {
 			return err
 		}
 		return nil
 	} else {
 		return err
 	}
+}
+
+func markRepoJobsCanceled(dbRepo core.DbRepo, repo, reason string, logf func(string, ...any)) (int, error) {
+	if dbRepo == nil || strings.TrimSpace(repo) == "" {
+		return 0, nil
+	}
+
+	statuses := []string{core.StatusRunning, core.StatusPending}
+	canceled := 0
+	for _, status := range statuses {
+		jobs, err := dbRepo.ListJob(core.JobFilter{Repo: repo, Status: status})
+		if err != nil {
+			return canceled, err
+		}
+		for _, job := range jobs {
+			if err := dbRepo.UpdateJob(job.Repo, job.Name, job.Branch, job.SHA, core.StatusCanceled, reason); err != nil {
+				return canceled, err
+			}
+			canceled++
+			logPollEvent(
+				logf,
+				"mark stale job canceled name=%s branch=%s sha=%s previous_status=%s",
+				job.Name,
+				job.Branch,
+				shortSHA(job.SHA),
+				status,
+			)
+		}
+	}
+	return canceled, nil
 }
 
 func findJobByKey(dbRepo core.DbRepo, repo, name, branch, sha string) (core.Job, error) {
