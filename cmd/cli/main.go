@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -151,7 +152,12 @@ func runPollLoop(args []string) error {
 	}
 
 	cfg := runtimeConfig{Repo: repo}
+	ciLogger, err := core.NewCIActivityLogger(repo)
+	if err != nil {
+		return err
+	}
 	runner := core.NewJobRunner(dbRepo)
+	runner.SetLogger(ciLogger.Logf)
 	if !*monitorMode {
 		cfg, err = parseRuntimeConfig(repo, *envPath)
 		if err != nil {
@@ -179,6 +185,12 @@ func runPollLoop(args []string) error {
 		}
 	}
 
+	modeLabel := "poll"
+	if *monitorMode {
+		modeLabel = "monitor"
+	}
+	ciLogger.Logf("worker start repo=%s mode=%s interval=%s", cfg.Repo, modeLabel, interval.String())
+
 	go func() {
 		defer close(done)
 		defer close(statusCh)
@@ -191,30 +203,47 @@ func runPollLoop(args []string) error {
 		if !*monitorMode {
 			doPoll = func() {
 				var loopErr error
+				started := time.Now()
+				ciLogger.Logf("poll tick start")
 
+				fetchStarted := time.Now()
+				ciLogger.Logf("fetch mirror start path=%s", mirrorPath)
 				if err := fetchMirror(ctx, mirrorPath); err != nil {
+					ciLogger.Logf("fetch mirror failed after %s: %v", time.Since(fetchStarted).Round(time.Millisecond), err)
 					loopErr = fmt.Errorf("fetch mirror: %w", err)
 				} else {
+					ciLogger.Logf("fetch mirror done in %s", time.Since(fetchStarted).Round(time.Millisecond))
+					loadStarted := time.Now()
+					ciLogger.Logf("load job config start ref=HEAD")
 					jobs, err := core.LoadJobConfsFromRepo(ctx, cfg.Repo, "HEAD")
 					if err != nil {
+						ciLogger.Logf("load job config failed after %s: %v", time.Since(loadStarted).Round(time.Millisecond), err)
 						loopErr = fmt.Errorf("load .refci/conf.yml: %w", err)
 					} else if len(jobs) == 0 {
+						ciLogger.Logf("load job config done in %s count=0", time.Since(loadStarted).Round(time.Millisecond))
 						loopErr = fmt.Errorf("no jobs found in .refci/conf.yml for %s", cfg.Repo)
-					} else if err := pollOnce(ctx, dbRepo, runner, cfg, jobs); err != nil {
-						loopErr = fmt.Errorf("poll failed: %w", err)
+					} else {
+						ciLogger.Logf("load job config done in %s count=%d", time.Since(loadStarted).Round(time.Millisecond), len(jobs))
+						if err := pollOnce(ctx, dbRepo, runner, cfg, jobs, ciLogger.Logf); err != nil {
+							loopErr = fmt.Errorf("poll failed: %w", err)
+						}
 					}
 				}
 
 				if loopErr != nil {
 					msg := loopErr.Error()
+					ciLogger.Logf("poll tick failed after %s: %v", time.Since(started).Round(time.Millisecond), loopErr)
 					if msg != lastErr {
 						reportStatus(msg+" (will retry)", true)
 						lastErr = msg
 					}
 				} else if lastErr != "" {
 					// clear previously shown transient error once poll succeeds again
+					ciLogger.Logf("poll tick recovered in %s", time.Since(started).Round(time.Millisecond))
 					reportStatus("", false)
 					lastErr = ""
+				} else {
+					ciLogger.Logf("poll tick done in %s", time.Since(started).Round(time.Millisecond))
 				}
 			}
 
@@ -227,18 +256,25 @@ func runPollLoop(args []string) error {
 		for {
 			select {
 			case <-ctx.Done():
+				ciLogger.Logf("worker stop")
 				return
 			case req := <-rerunCh:
+				ciLogger.Logf("rerun requested job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
 				if err := rerunJob(ctx, runner, cfg, req); err != nil {
+					ciLogger.Logf("rerun failed job=%s branch=%s sha=%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err)
 					reportStatus(fmt.Sprintf("restart failed for %s/%s: %v", req.Name, req.Branch, err), true)
 					continue
 				}
+				ciLogger.Logf("rerun started job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
 				reportStatus(fmt.Sprintf("restart started for %s/%s", req.Name, req.Branch), false)
 			case req := <-cancelCh:
+				ciLogger.Logf("cancel requested job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
 				if err := cancelJob(ctx, dbRepo, runner, req); err != nil {
+					ciLogger.Logf("cancel failed job=%s branch=%s sha=%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err)
 					reportStatus(fmt.Sprintf("cancel failed for %s/%s@%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err), true)
 					continue
 				}
+				ciLogger.Logf("cancel accepted job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
 				reportStatus(fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)), false)
 			case <-tickerCh:
 				doPoll()
@@ -374,35 +410,84 @@ func resolveRepoTarget(target string) (repo string, mirrorPath string, err error
 	return repo, filepath.Join(core.Root, "repos", core.ToLocalRepo(repo)), nil
 }
 
-func pollOnce(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, cfg runtimeConfig, jobs []core.JobConf) error {
+func pollOnce(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, cfg runtimeConfig, jobs []core.JobConf, logf func(string, ...any)) error {
 	for _, jc := range jobs {
 		branchSHA, err := core.ListBranchHeadsByPattern(ctx, cfg.Repo, jc.BranchPattern)
 		if err != nil {
+			logPollEvent(logf, "scan job=%s pattern=%q failed listing branches: %v", jc.Name, jc.BranchPattern, err)
 			return err
 		}
-		for branch, sha := range branchSHA {
+		if len(branchSHA) == 0 {
+			logPollEvent(logf, "scan job=%s pattern=%q matched=0", jc.Name, jc.BranchPattern)
+			continue
+		}
+
+		branches := sortedBranchNames(branchSHA)
+		results := make([]string, 0, len(branches))
+		queuedCount := 0
+		for _, branch := range branches {
+			sha := branchSHA[branch]
 			latestJob, err := dbRepo.LatestJobByNameBranch(cfg.Repo, jc.Name, branch)
 			if err != nil {
+				logPollEvent(logf, "scan job=%s branch=%s failed reading latest job: %v", jc.Name, branch, err)
 				return err
 			}
 			prevSHA := latestJob.SHA
+			if prevSHA == sha {
+				results = append(results, fmt.Sprintf("%s@%s=no-change", branch, shortSHA(sha)))
+				continue
+			}
 
 			shouldRun, err := core.ShouldRunByPathPatterns(ctx, cfg.Repo, prevSHA, sha, jc.PathPatterns)
 			if err != nil {
+				logPollEvent(logf, "scan job=%s branch=%s failed checking paths: %v", jc.Name, branch, err)
 				return err
 			}
 			if !shouldRun {
+				results = append(results, fmt.Sprintf("%s@%s=path-skip(prev=%s)", branch, shortSHA(sha), shortSHA(prevSHA)))
 				continue
 			}
 
 			jobConf := jc
 			jobConf.Repo = cfg.Repo
 			if err := runner.QueueJob(jobConf, cfg.Env, branch, sha); err != nil {
+				logPollEvent(logf, "queue job=%s branch=%s sha=%s failed: %v", jc.Name, branch, shortSHA(sha), err)
 				return err
 			}
+			queuedCount++
+			if prevSHA == "" {
+				results = append(results, fmt.Sprintf("%s@%s=queued(first-run)", branch, shortSHA(sha)))
+				continue
+			}
+			results = append(results, fmt.Sprintf("%s@%s=queued(prev=%s)", branch, shortSHA(sha), shortSHA(prevSHA)))
 		}
+		logPollEvent(
+			logf,
+			"scan job=%s pattern=%q matched=%d queued=%d results=%s",
+			jc.Name,
+			jc.BranchPattern,
+			len(branches),
+			queuedCount,
+			strings.Join(results, ", "),
+		)
 	}
 	return nil
+}
+
+func sortedBranchNames(branchSHA map[string]string) []string {
+	branches := make([]string, 0, len(branchSHA))
+	for branch := range branchSHA {
+		branches = append(branches, branch)
+	}
+	sort.Strings(branches)
+	return branches
+}
+
+func logPollEvent(logf func(string, ...any), format string, args ...any) {
+	if logf == nil {
+		return
+	}
+	logf(format, args...)
 }
 
 func rerunJob(ctx context.Context, runner *core.JobRunner, cfg runtimeConfig, req tui.RerunRequest) error {

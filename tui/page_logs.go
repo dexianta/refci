@@ -18,6 +18,7 @@ type logsViewMode int
 const (
 	logsModeList logsViewMode = iota
 	logsModeDetail
+	logsModeCI
 )
 
 type logsModel struct {
@@ -143,7 +144,7 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 		return m, nil, true
 
 	case loadJobLogMsg:
-		if m.mode != logsModeDetail || mg.path != m.logPath {
+		if (m.mode != logsModeDetail && m.mode != logsModeCI) || mg.path != m.logPath {
 			return m, nil, true
 		}
 		if mg.err != nil {
@@ -163,7 +164,7 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 		if m.repo == "" {
 			return m, nil, false
 		}
-		if m.mode == logsModeDetail && strings.TrimSpace(m.logPath) != "" {
+		if (m.mode == logsModeDetail || m.mode == logsModeCI) && strings.TrimSpace(m.logPath) != "" {
 			return m, loadJobLogCmd(m.logPath), true
 		}
 		return m, loadRepoJobsCmd(m.dbRepo, m.repo), true
@@ -173,7 +174,7 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 			return m, nil, false
 		}
 
-		if m.mode == logsModeDetail {
+		if m.mode == logsModeDetail || m.mode == logsModeCI {
 			switch mg.String() {
 			case "esc", "enter", "backspace":
 				m.mode = logsModeList
@@ -195,6 +196,11 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 			}
 			m.mode = logsModeDetail
 			m.logPath = pathForJob(m.jobs[m.selected])
+			m.logRows = nil
+			return m, loadJobLogCmd(m.logPath), true
+		case "l", "L":
+			m.mode = logsModeCI
+			m.logPath = core.CIActivityLogPath(m.repo)
 			m.logRows = nil
 			return m, loadJobLogCmd(m.logPath), true
 		case "r":
@@ -237,14 +243,14 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 }
 
 func (m logsModel) View() string {
-	if m.mode == logsModeDetail {
+	if m.mode != logsModeList {
 		return m.renderLogDetail()
 	}
 	return m.renderJobList()
 }
 
 func (m logsModel) help() string {
-	if m.mode == logsModeDetail {
+	if m.mode == logsModeDetail || m.mode == logsModeCI {
 		return footerBarStyle.Render(
 			renderHint("ESC/ENTER", "back"),
 		)
@@ -252,7 +258,8 @@ func (m logsModel) help() string {
 
 	hints := []string{
 		renderHint("UP/DOWN", "move"),
-		renderHint("ENTER", "open log"),
+		renderHint("ENTER", "job log"),
+		renderHint("L", "ci log"),
 		renderHint("R", "restart"),
 		renderHint("C", "cancel"),
 	}
@@ -359,11 +366,19 @@ func fixedCell(v string, width int) string {
 	}
 	return s
 }
+
 func (m logsModel) renderLogDetail() string {
-	header := sectionTitleStyle.Render("Log Detail")
+	title := "Job Log"
+	emptyText := "(empty)"
+	if m.mode == logsModeCI {
+		title = "CI Activity"
+		emptyText = "(no CI activity yet)"
+	}
+
+	header := sectionTitleStyle.Render(title)
 	meta := mutedStyle.Render(fmt.Sprintf("path=%s", m.logPath))
 
-	body := mutedStyle.Render("(empty)")
+	body := mutedStyle.Render(emptyText)
 	if len(m.logRows) > 0 {
 		body = strings.Join(m.logRows, "\n")
 	}

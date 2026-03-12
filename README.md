@@ -41,7 +41,7 @@ This creates:
 - `refci.db`
 - `repos/` (mirror repos)
 - `worktrees/` (per-branch worktrees)
-- `logs/` (job logs)
+- `logs/` (job logs + per-repo CI activity log)
 
 ### 3) Clone a repo mirror
 
@@ -129,6 +129,7 @@ Queued run behavior:
 - update `jobs` row in sqlite
 
 If fetch/config/poll fails, refci keeps running, shows the error in the TUI, and retries on the next interval.
+Internal runner activity is also appended to `logs/<repo>/ci.log` so you can inspect fetch/poll decisions separately from job output.
 
 ### 7) TUI
 
@@ -136,6 +137,7 @@ Single logs page:
 - shows latest 10 jobs (most recent first), including commit author
 - `UP/DOWN`: select job
 - `ENTER`: open log detail (stream the last 200 line of the file each second)
+- `L`: open CI activity log detail (fetch/config/poll/queue lifecycle, refreshed each second)
 - `R`: rerun when the latest attempt for that job/branch is failed
 - `C`: cancel selected running/pending job
 - `ESC` or `ENTER` (detail): back
