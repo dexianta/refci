@@ -275,8 +275,26 @@ const (
 	elapsedColWidth    = 7
 )
 
-var actionNamePalette = []lipgloss.Color{
-	"196", "202", "220", "118", "47", "51", "39", "99", "201", "165", "208", "178",
+type actionNameColors struct {
+	fg lipgloss.Color
+	bg lipgloss.Color
+}
+
+var actionNamePalette = []actionNameColors{
+	{fg: "16", bg: "196"},
+	{fg: "16", bg: "208"},
+	{fg: "16", bg: "220"},
+	{fg: "16", bg: "118"},
+	{fg: "16", bg: "49"},
+	{fg: "16", bg: "45"},
+	{fg: "16", bg: "51"},
+	{fg: "231", bg: "33"},
+	{fg: "231", bg: "63"},
+	{fg: "231", bg: "99"},
+	{fg: "16", bg: "201"},
+	{fg: "16", bg: "207"},
+	{fg: "16", bg: "178"},
+	{fg: "231", bg: "130"},
 }
 
 func (m logsModel) renderJobList() string {
@@ -334,8 +352,11 @@ func actionNameStyle(name string) lipgloss.Style {
 	if len(actionNamePalette) == 0 {
 		return lipgloss.NewStyle().Bold(true)
 	}
-	idx := actionNameColorIndex(name)
-	return lipgloss.NewStyle().Foreground(actionNamePalette[idx]).Bold(true)
+	colors := actionNamePalette[actionNameColorIndex(name)]
+	return lipgloss.NewStyle().
+		Foreground(colors.fg).
+		Background(colors.bg).
+		Bold(true)
 }
 
 func actionNameColorIndex(name string) int {
