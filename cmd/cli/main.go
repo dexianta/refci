@@ -185,12 +185,14 @@ func runPollLoop(args []string) error {
 		}
 	}
 
-	staleCount, err := markRepoJobsCanceled(dbRepo, cfg.Repo, "worker restarted before job completion", ciLogger.Logf)
-	if err != nil {
-		return err
-	}
-	if staleCount > 0 {
-		reportStatus(fmt.Sprintf("marked %d stale jobs as canceled", staleCount), false)
+	if !*monitorMode {
+		staleCount, err := markRepoJobsCanceled(dbRepo, cfg.Repo, "worker restarted before job completion", ciLogger.Logf)
+		if err != nil {
+			return err
+		}
+		if staleCount > 0 {
+			reportStatus(fmt.Sprintf("marked %d stale jobs as canceled", staleCount), false)
+		}
 	}
 
 	modeLabel := "poll"
@@ -264,10 +266,12 @@ func runPollLoop(args []string) error {
 		for {
 			select {
 			case <-ctx.Done():
-				if count, err := markRepoJobsCanceled(dbRepo, cfg.Repo, "worker stopped before job completion", ciLogger.Logf); err != nil {
-					ciLogger.Logf("worker stop cleanup failed: %v", err)
-				} else if count > 0 {
-					ciLogger.Logf("worker stop cleanup marked=%d", count)
+				if !*monitorMode {
+					if count, err := markRepoJobsCanceled(dbRepo, cfg.Repo, "worker stopped before job completion", ciLogger.Logf); err != nil {
+						ciLogger.Logf("worker stop cleanup failed: %v", err)
+					} else if count > 0 {
+						ciLogger.Logf("worker stop cleanup marked=%d", count)
+					}
 				}
 				ciLogger.Logf("worker stop")
 				return
