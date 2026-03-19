@@ -3,7 +3,7 @@ package tui
 import (
 	"dexianta/refci/core"
 	"fmt"
-	"hash/fnv"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -29,6 +29,8 @@ type logsModel struct {
 
 	jobs     []core.Job
 	selected int
+
+	actionNameColors map[string]lipgloss.Color
 
 	mode    logsViewMode
 	logPath string
@@ -59,10 +61,22 @@ func (m logsModel) Init() tea.Cmd {
 func loadRepoJobsCmd(dbRepo core.DbRepo, repo string) tea.Cmd {
 	return func() tea.Msg {
 		jobs, err := dbRepo.ListJob(core.JobFilter{Repo: repo, Limit: 10})
+		if err != nil {
+			return loadRepoJobsMsg{
+				repo: repo,
+				jobs: jobs,
+				err:  err,
+			}
+		}
+		jobNames, namesErr := dbRepo.ListJobNames(repo)
+		if namesErr != nil {
+			jobNames = nil
+		}
 		return loadRepoJobsMsg{
-			repo: repo,
-			jobs: jobs,
-			err:  err,
+			repo:     repo,
+			jobs:     jobs,
+			jobNames: jobNames,
+			err:      nil,
 		}
 	}
 }
@@ -131,6 +145,9 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 			return m, nil, true
 		}
 		m.jobs = mg.jobs
+		if len(mg.jobNames) > 0 {
+			m.actionNameColors = buildActionNameColors(mg.jobNames)
+		}
 		if len(m.jobs) == 0 {
 			m.selected = 0
 		} else if m.selected >= len(m.jobs) {
@@ -275,28 +292,11 @@ const (
 	elapsedColWidth    = 7
 )
 
-var actionNamePalette = []lipgloss.Color{
-	"196",
-	"202",
-	"226",
-	"118",
-	"48",
-	"51",
-	"39",
-	"33",
-	"99",
-	"201",
-	"207",
-	"165",
-	"214",
-	"178",
-}
-
 func (m logsModel) renderJobList() string {
 	lines := make([]string, 0, len(m.jobs))
 	now := time.Now()
 	for i, j := range m.jobs {
-		nameCell := renderActionName(j.Name, actionNameColWidth)
+		nameCell := m.renderActionName(j.Name, actionNameColWidth)
 		branchCell := fixedCell(j.Branch, branchColWidth)
 		shaCell := fixedCell(shortSHA(j.SHA), shaColWidth)
 		authorCell := fixedCell(displayCommitAuthor(j.CommitAuthor), authorColWidth)
@@ -335,28 +335,113 @@ func (m logsModel) renderJobList() string {
 	return renderRegion("Jobs", []string{strings.Join(lines, "\n")}, help, true)
 }
 
-func renderActionName(name string, width int) string {
+func (m logsModel) renderActionName(name string, width int) string {
 	cell := fixedCell(name, width)
 	if strings.TrimSpace(name) == "" {
 		return cell
 	}
-	return actionNameStyle(name).Render(cell)
+	return actionNameStyle(name, m.actionNameColors).Render(cell)
 }
 
-func actionNameStyle(name string) lipgloss.Style {
-	if len(actionNamePalette) == 0 {
+func actionNameStyle(name string, assigned map[string]lipgloss.Color) lipgloss.Style {
+	color := actionNameColor(name, assigned)
+	if color == lipgloss.Color("") {
 		return lipgloss.NewStyle().Bold(true)
 	}
-	color := actionNamePalette[actionNameColorIndex(name)]
 	return lipgloss.NewStyle().
 		Foreground(color).
 		Bold(true)
 }
 
-func actionNameColorIndex(name string) int {
-	h := fnv.New32a()
-	_, _ = h.Write([]byte(strings.ToLower(strings.TrimSpace(name))))
-	return int(h.Sum32() % uint32(len(actionNamePalette)))
+func actionNameColor(name string, assigned map[string]lipgloss.Color) lipgloss.Color {
+	key := strings.TrimSpace(name)
+	if color, ok := assigned[key]; ok {
+		return color
+	}
+	return lipgloss.Color(uniqueActionNameColorHex(stableActionNameIndex(key), nil))
+}
+
+func buildActionNameColors(names []string) map[string]lipgloss.Color {
+	colors := make(map[string]lipgloss.Color, len(names))
+	used := make(map[string]struct{}, len(names))
+	index := 0
+	for _, raw := range names {
+		name := strings.TrimSpace(raw)
+		if name == "" {
+			continue
+		}
+		if _, exists := colors[name]; exists {
+			continue
+		}
+		hex := uniqueActionNameColorHex(index, used)
+		colors[name] = lipgloss.Color(hex)
+		used[hex] = struct{}{}
+		index++
+	}
+	return colors
+}
+
+func uniqueActionNameColorHex(index int, used map[string]struct{}) string {
+	for attempt := 0; attempt < 12; attempt++ {
+		hue := math.Mod(24+137.508*float64(index)+19*float64(attempt), 360)
+		saturation := 0.68
+		lightness := 0.58
+		switch attempt % 3 {
+		case 1:
+			lightness = 0.64
+		case 2:
+			lightness = 0.52
+		}
+		hex := hslToHex(hue, saturation, lightness)
+		if used == nil {
+			return hex
+		}
+		if _, exists := used[hex]; !exists {
+			return hex
+		}
+	}
+	return hslToHex(math.Mod(24+137.508*float64(index), 360), 0.78, 0.5)
+}
+
+func stableActionNameIndex(name string) int {
+	var hash uint32 = 2166136261
+	for _, r := range strings.ToLower(strings.TrimSpace(name)) {
+		hash ^= uint32(r)
+		hash *= 16777619
+	}
+	return int(hash)
+}
+
+func hslToHex(h, s, l float64) string {
+	r, g, b := hslToRGB(h, s, l)
+	return fmt.Sprintf("#%02X%02X%02X", r, g, b)
+}
+
+func hslToRGB(h, s, l float64) (int, int, int) {
+	c := (1 - math.Abs(2*l-1)) * s
+	x := c * (1 - math.Abs(math.Mod(h/60, 2)-1))
+	m := l - c/2
+
+	var r1, g1, b1 float64
+	switch {
+	case h < 60:
+		r1, g1, b1 = c, x, 0
+	case h < 120:
+		r1, g1, b1 = x, c, 0
+	case h < 180:
+		r1, g1, b1 = 0, c, x
+	case h < 240:
+		r1, g1, b1 = 0, x, c
+	case h < 300:
+		r1, g1, b1 = x, 0, c
+	default:
+		r1, g1, b1 = c, 0, x
+	}
+
+	r := int(math.Round((r1 + m) * 255))
+	g := int(math.Round((g1 + m) * 255))
+	b := int(math.Round((b1 + m) * 255))
+	return r, g, b
 }
 
 func displayCommitAuthor(v string) string {

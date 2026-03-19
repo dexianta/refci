@@ -50,4 +50,5 @@ type DbRepo interface {
 	CreateJob(repo, name, branch, sha, commitAuthor string) error
 	UpdateJob(repo, name, branch, sha, status, msg string) error // for cancel, or finish etc
 	ListJob(filter JobFilter) ([]Job, error)
+	ListJobNames(repo string) ([]string, error)
 }

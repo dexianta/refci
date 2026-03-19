@@ -231,6 +231,36 @@ func (r SQLiteRepo) ListJob(filter JobFilter) ([]Job, error) {
 	return out, nil
 }
 
+func (r SQLiteRepo) ListJobNames(repo string) ([]string, error) {
+	query := `SELECT name FROM jobs`
+	args := make([]any, 0, 1)
+	if strings.TrimSpace(repo) != "" {
+		query += ` WHERE repo = ?`
+		args = append(args, repo)
+	}
+	query += ` GROUP BY name ORDER BY MIN(start_at) ASC, name ASC`
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list job names: %w", err)
+	}
+	defer rows.Close()
+
+	names := make([]string, 0)
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return nil, fmt.Errorf("scan job name: %w", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate job names: %w", err)
+	}
+
+	return names, nil
+}
+
 func formatStoredTime(t time.Time) string {
 	return t.UTC().Format(time.RFC3339Nano)
 }

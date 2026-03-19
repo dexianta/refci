@@ -22,9 +22,10 @@ type CancelRequest struct {
 }
 
 type loadRepoJobsMsg struct {
-	repo string
-	jobs []core.Job
-	err  error
+	repo     string
+	jobs     []core.Job
+	jobNames []string
+	err      error
 }
 
 type loadJobLogMsg struct {
