@@ -300,7 +300,7 @@ func (m logsModel) renderJobList() string {
 		branchCell := fixedCell(j.Branch, branchColWidth)
 		shaCell := fixedCell(shortSHA(j.SHA), shaColWidth)
 		authorCell := fixedCell(displayCommitAuthor(j.CommitAuthor), authorColWidth)
-		statusCell := fixedCell(statusTag(j.Status), statusColWidth)
+		statusCell := renderStatusCell(j.Status, statusColWidth)
 		elapsedCell := fixedCell(elapsedForJob(now, j), elapsedColWidth)
 
 		line := strings.Join([]string{
@@ -435,6 +435,27 @@ func statusTag(v string) string {
 		return "CANCELED"
 	default:
 		return strings.ToUpper(v)
+	}
+}
+
+func renderStatusCell(v string, width int) string {
+	return statusStyle(v).Render(fixedCell(statusTag(v), width))
+}
+
+func statusStyle(v string) lipgloss.Style {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case core.StatusRunning:
+		return warningStyle
+	case core.StatusPending:
+		return pendingStyle
+	case core.StatusFinished:
+		return successStyle
+	case core.StatusFailed:
+		return errorStyle
+	case core.StatusCanceled:
+		return mutedStyle
+	default:
+		return lipgloss.NewStyle()
 	}
 }
 

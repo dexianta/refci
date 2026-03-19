@@ -39,6 +39,14 @@ var (
 	successStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("114"))
 
+	warningStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("220")).
+			Bold(true)
+
+	pendingStyle = lipgloss.NewStyle().
+			Foreground(lipgloss.Color("81")).
+			Bold(true)
+
 	errorStyle = lipgloss.NewStyle().
 			Foreground(lipgloss.Color("203")).
 			Bold(true)
