@@ -98,8 +98,9 @@ func (j *JobRunner) RerunJob(jobConf JobConf, envs []string, branch string) erro
 	if latestJob.SHA == "" {
 		return fmt.Errorf("no previous job found for %s/%s", name, branch)
 	}
-	if strings.ToLower(strings.TrimSpace(latestJob.Status)) != StatusFailed {
-		return fmt.Errorf("latest job status is %q; only failed jobs can be rerun", latestJob.Status)
+	status := strings.ToLower(strings.TrimSpace(latestJob.Status))
+	if status != StatusFailed && status != StatusCanceled {
+		return fmt.Errorf("latest job status is %q; only failed/canceled jobs can be rerun", latestJob.Status)
 	}
 
 	j.logEvent("rerun queued job=%s branch=%s sha=%s", name, branch, shortSHA(latestJob.SHA))
