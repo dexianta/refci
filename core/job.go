@@ -12,9 +12,12 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 type RunJobRequest struct {
+	RunID        string
 	Repo         string
 	Name         string
 	Branch       string
@@ -26,9 +29,10 @@ type RunJobRequest struct {
 }
 
 type JobRunner struct {
-	dbRepo      DbRepo
-	cancelGrace time.Duration
-	logf        func(string, ...any)
+	dbRepo            DbRepo
+	cancelGrace       time.Duration
+	exitCleanupGrace  time.Duration
+	logf              func(string, ...any)
 
 	mu      sync.Mutex
 	running map[string]*runningJob
@@ -44,9 +48,10 @@ type runningJob struct {
 
 func NewJobRunner(dbRepo DbRepo) *JobRunner {
 	return &JobRunner{
-		dbRepo:      dbRepo,
-		cancelGrace: 5 * time.Second,
-		running:     map[string]*runningJob{},
+		dbRepo:           dbRepo,
+		cancelGrace:      5 * time.Second,
+		exitCleanupGrace: 300 * time.Millisecond,
+		running:          map[string]*runningJob{},
 	}
 }
 
@@ -71,13 +76,14 @@ func (j *JobRunner) QueueJob(jobConf JobConf, envs []string, branch, sha string)
 
 	if latestJob.Status == StatusRunning || latestJob.Status == StatusPending {
 		j.logEvent(
-			"queue cancel previous job=%s branch=%s prev_sha=%s status=%s",
+			"queue cancel previous job=%s branch=%s run=%s prev_sha=%s status=%s",
 			latestJob.Name,
 			latestJob.Branch,
+			shortRunID(latestJob.RunID),
 			shortSHA(latestJob.SHA),
 			strings.ToLower(strings.TrimSpace(latestJob.Status)),
 		)
-		if err = j.Cancel(latestJob.Repo, latestJob.Name, latestJob.Branch, latestJob.SHA); err != nil {
+		if err = j.Cancel(latestJob); err != nil {
 			return err
 		}
 	}
@@ -85,26 +91,18 @@ func (j *JobRunner) QueueJob(jobConf JobConf, envs []string, branch, sha string)
 	return j.runJobAtSHA(jobConf, envs, branch, sha)
 }
 
-func (j *JobRunner) RerunJob(jobConf JobConf, envs []string, branch string) error {
+func (j *JobRunner) RerunJob(jobConf JobConf, envs []string, branch, sha string) error {
 	name := jobConf.Name
 	if name == "" {
 		return fmt.Errorf("job name is required")
 	}
-
-	latestJob, err := j.dbRepo.LatestJobByNameBranch(jobConf.Repo, name, branch)
-	if err != nil {
-		return err
-	}
-	if latestJob.SHA == "" {
-		return fmt.Errorf("no previous job found for %s/%s", name, branch)
-	}
-	status := strings.ToLower(strings.TrimSpace(latestJob.Status))
-	if status != StatusFailed && status != StatusCanceled {
-		return fmt.Errorf("latest job status is %q; only failed/canceled jobs can be rerun", latestJob.Status)
+	sha = strings.TrimSpace(sha)
+	if sha == "" {
+		return fmt.Errorf("job sha is required")
 	}
 
-	j.logEvent("rerun queued job=%s branch=%s sha=%s", name, branch, shortSHA(latestJob.SHA))
-	return j.runJobAtSHA(jobConf, envs, branch, latestJob.SHA)
+	j.logEvent("rerun queued job=%s branch=%s sha=%s", name, branch, shortSHA(sha))
+	return j.runJobAtSHA(jobConf, envs, branch, sha)
 }
 
 func (j *JobRunner) runJobAtSHA(jobConf JobConf, envs []string, branch, sha string) error {
@@ -126,7 +124,9 @@ func (j *JobRunner) runJobAtSHA(jobConf JobConf, envs []string, branch, sha stri
 		commitAuthor = ""
 	}
 
+	runID := newRunID()
 	if _, err = j.Start(context.Background(), RunJobRequest{
+		RunID:        runID,
 		Repo:         jobConf.Repo,
 		Name:         name,
 		Branch:       branch,
@@ -144,21 +144,24 @@ func (j *JobRunner) runJobAtSHA(jobConf JobConf, envs []string, branch, sha stri
 }
 
 func (r *JobRunner) Start(ctx context.Context, req RunJobRequest) (string, error) {
-	key := jobKey(req.Repo, req.Name, req.Branch, req.SHA)
+	key := strings.TrimSpace(req.RunID)
+	if key == "" {
+		return "", fmt.Errorf("job run id is required")
+	}
 	r.mu.Lock()
 	if _, exists := r.running[key]; exists {
 		r.mu.Unlock()
-		return "", fmt.Errorf("job is already running: %s %s %s %s", req.Repo, req.Name, req.Branch, req.SHA)
+		return "", fmt.Errorf("job is already running: %s", key)
 	}
 	r.mu.Unlock()
 
-	if err := r.dbRepo.CreateJob(req.Repo, req.Name, req.Branch, req.SHA, req.CommitAuthor); err != nil {
+	if err := r.dbRepo.CreateJob(req.RunID, req.Repo, req.Name, req.Branch, req.SHA, req.CommitAuthor); err != nil {
 		return "", fmt.Errorf("create job row: %w", err)
 	}
 
 	logPath, logFile, err := createJobLogFile(req)
 	if err != nil {
-		_ = r.dbRepo.UpdateJob(req.Repo, req.Name, req.Branch, req.SHA, StatusFailed, err.Error())
+		_ = r.dbRepo.UpdateJob(req.RunID, StatusFailed, err.Error(), "")
 		return "", err
 	}
 
@@ -170,7 +173,7 @@ func (r *JobRunner) Start(ctx context.Context, req RunJobRequest) (string, error
 	cmd.Env = append(os.Environ(), req.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	if err := r.dbRepo.UpdateJob(req.Repo, req.Name, req.Branch, req.SHA, StatusRunning, logPath); err != nil {
+	if err := r.dbRepo.UpdateJob(req.RunID, StatusRunning, "", logPath); err != nil {
 		_ = logFile.Close()
 		cancel()
 		return "", fmt.Errorf("set job running: %w", err)
@@ -178,7 +181,7 @@ func (r *JobRunner) Start(ctx context.Context, req RunJobRequest) (string, error
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
-		_ = r.dbRepo.UpdateJob(req.Repo, req.Name, req.Branch, req.SHA, StatusFailed, err.Error())
+		_ = r.dbRepo.UpdateJob(req.RunID, StatusFailed, err.Error(), "")
 		cancel()
 		return "", fmt.Errorf("start job process: %w", err)
 	}
@@ -194,23 +197,26 @@ func (r *JobRunner) Start(ctx context.Context, req RunJobRequest) (string, error
 	r.running[key] = rj
 	r.mu.Unlock()
 
-	r.logEvent("job started name=%s branch=%s sha=%s pid=%d log=%s", req.Name, req.Branch, shortSHA(req.SHA), cmd.Process.Pid, logPath)
+	r.logEvent("job started name=%s branch=%s run=%s sha=%s pid=%d log=%s", req.Name, req.Branch, shortRunID(req.RunID), shortSHA(req.SHA), cmd.Process.Pid, logPath)
 	go r.waitJob(req, key, rj, logFile)
 
 	return logPath, nil
 }
 
-func (r *JobRunner) Cancel(repo, name, branch, sha string) error {
-	key := jobKey(repo, name, branch, sha)
+func (r *JobRunner) Cancel(job Job) error {
+	key := strings.TrimSpace(job.RunID)
+	if key == "" {
+		return fmt.Errorf("job run id is required")
+	}
 
 	r.mu.Lock()
 	rj, ok := r.running[key]
 	r.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("job is not running: %s %s %s %s", repo, name, branch, sha)
+		return fmt.Errorf("job is not running: %s %s %s %s", job.Repo, job.Name, job.Branch, job.SHA)
 	}
 
-	r.logEvent("cancel requested job=%s branch=%s sha=%s", name, branch, shortSHA(sha))
+	r.logEvent("cancel requested job=%s branch=%s run=%s sha=%s", job.Name, job.Branch, shortRunID(job.RunID), shortSHA(job.SHA))
 	rj.canceled.Store(true)
 	rj.cancel()
 
@@ -226,14 +232,14 @@ func (r *JobRunner) Cancel(repo, name, branch, sha string) error {
 
 	if rj.cmd.Process != nil {
 		_ = signalProcess(rj.cmd.Process.Pid, syscall.SIGKILL)
-		r.logEvent("cancel escalated to kill job=%s branch=%s sha=%s", name, branch, shortSHA(sha))
+		r.logEvent("cancel escalated to kill job=%s branch=%s run=%s sha=%s", job.Name, job.Branch, shortRunID(job.RunID), shortSHA(job.SHA))
 	}
 
 	return nil
 }
 
-func (r *JobRunner) IsRunning(repo, name, branch, sha string) bool {
-	key := jobKey(repo, name, branch, sha)
+func (r *JobRunner) IsRunning(runID string) bool {
+	key := strings.TrimSpace(runID)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	_, ok := r.running[key]
@@ -241,15 +247,21 @@ func (r *JobRunner) IsRunning(repo, name, branch, sha string) bool {
 }
 
 func (r *JobRunner) waitJob(req RunJobRequest, key string, rj *runningJob, logFile *os.File) {
+	pid := 0
+	if rj.cmd.Process != nil {
+		pid = rj.cmd.Process.Pid
+	}
 	err := rj.cmd.Wait()
+	r.cleanupProcessGroup(req, pid)
 	_ = logFile.Close()
 
 	status, msg := classifyJobResult(err, rj.canceled.Load())
-	_ = r.dbRepo.UpdateJob(req.Repo, req.Name, req.Branch, req.SHA, status, msg)
+	_ = r.dbRepo.UpdateJob(req.RunID, status, msg, "")
 	r.logEvent(
-		"job finished name=%s branch=%s sha=%s status=%s duration=%s msg=%s",
+		"job finished name=%s branch=%s run=%s sha=%s status=%s duration=%s msg=%s",
 		req.Name,
 		req.Branch,
+		shortRunID(req.RunID),
 		shortSHA(req.SHA),
 		status,
 		time.Since(rj.started).Round(time.Millisecond),
@@ -260,6 +272,27 @@ func (r *JobRunner) waitJob(req RunJobRequest, key string, rj *runningJob, logFi
 	delete(r.running, key)
 	r.mu.Unlock()
 	close(rj.done)
+}
+
+func (r *JobRunner) cleanupProcessGroup(req RunJobRequest, pid int) {
+	if pid <= 0 || !processGroupExists(pid) {
+		return
+	}
+
+	r.logEvent("job cleanup started name=%s branch=%s run=%s sha=%s pid=%d", req.Name, req.Branch, shortRunID(req.RunID), shortSHA(req.SHA), pid)
+	_ = signalProcessGroup(pid, syscall.SIGTERM)
+	if waitForProcessGroupExit(pid, r.exitCleanupGrace) {
+		r.logEvent("job cleanup finished name=%s branch=%s run=%s sha=%s mode=term", req.Name, req.Branch, shortRunID(req.RunID), shortSHA(req.SHA))
+		return
+	}
+
+	_ = signalProcessGroup(pid, syscall.SIGKILL)
+	if waitForProcessGroupExit(pid, 100*time.Millisecond) {
+		r.logEvent("job cleanup finished name=%s branch=%s run=%s sha=%s mode=kill", req.Name, req.Branch, shortRunID(req.RunID), shortSHA(req.SHA))
+		return
+	}
+
+	r.logEvent("job cleanup incomplete name=%s branch=%s run=%s sha=%s pid=%d", req.Name, req.Branch, shortRunID(req.RunID), shortSHA(req.SHA), pid)
 }
 
 func (r *JobRunner) logEvent(format string, args ...any) {
@@ -295,15 +328,16 @@ func createJobLogFile(req RunJobRequest) (string, *os.File, error) {
 	refPart := sanitizePathToken(req.Name)
 	branchPart := sanitizePathToken(req.Branch)
 	shaPart := sanitizePathToken(shortSHA(req.SHA))
+	runPart := sanitizePathToken(shortRunID(req.RunID))
 
 	dir := filepath.Join(Root, "logs", repoPart)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", nil, fmt.Errorf("create log dir %q: %w", dir, err)
 	}
 
-	name := fmt.Sprintf("%s-%s-%s.log", refPart, branchPart, shaPart)
+	name := fmt.Sprintf("%s-%s-%s-%s.log", refPart, branchPart, shaPart, runPart)
 	logPath := filepath.Join(dir, name)
-	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o644)
 	if err != nil {
 		return "", nil, fmt.Errorf("open log file %q: %w", logPath, err)
 	}
@@ -316,7 +350,7 @@ func signalProcess(pid int, sig syscall.Signal) error {
 	}
 
 	// Try process group first to terminate spawned children too.
-	if err := syscall.Kill(-pid, sig); err == nil {
+	if err := signalProcessGroup(pid, sig); err == nil {
 		return nil
 	} else if !errors.Is(err, syscall.ESRCH) {
 		// Fall back to direct process signal below.
@@ -329,8 +363,53 @@ func signalProcess(pid int, sig syscall.Signal) error {
 	return nil
 }
 
-func jobKey(repo, name, branch, sha string) string {
-	return repo + "\x00" + name + "\x00" + branch + "\x00" + sha
+func signalProcessGroup(pid int, sig syscall.Signal) error {
+	if pid <= 0 {
+		return nil
+	}
+	err := syscall.Kill(-pid, sig)
+	if err != nil && !errors.Is(err, syscall.ESRCH) {
+		return err
+	}
+	return nil
+}
+
+func processGroupExists(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	err := syscall.Kill(-pid, 0)
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
+func waitForProcessGroupExit(pid int, timeout time.Duration) bool {
+	if !processGroupExists(pid) {
+		return true
+	}
+	if timeout <= 0 {
+		return !processGroupExists(pid)
+	}
+
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		time.Sleep(20 * time.Millisecond)
+		if !processGroupExists(pid) {
+			return true
+		}
+	}
+	return !processGroupExists(pid)
+}
+
+func newRunID() string {
+	return uuid.NewString()
+}
+
+func shortRunID(runID string) string {
+	s := strings.TrimSpace(runID)
+	if len(s) <= 8 {
+		return s
+	}
+	return s[:8]
 }
 
 func shortSHA(sha string) string {

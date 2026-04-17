@@ -277,7 +277,7 @@ func runPollLoop(args []string) error {
 				return
 			case req := <-rerunCh:
 				ciLogger.Logf("rerun requested job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
-				if err := rerunJob(ctx, runner, cfg, req); err != nil {
+				if err := rerunJob(ctx, dbRepo, runner, cfg, req); err != nil {
 					ciLogger.Logf("rerun failed job=%s branch=%s sha=%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err)
 					reportStatus(fmt.Sprintf("restart failed for %s/%s: %v", req.Name, req.Branch, err), true)
 					continue
@@ -507,9 +507,27 @@ func logPollEvent(logf func(string, ...any), format string, args ...any) {
 	logf(format, args...)
 }
 
-func rerunJob(ctx context.Context, runner *core.JobRunner, cfg runtimeConfig, req tui.RerunRequest) error {
-	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Branch) == "" {
+func rerunJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, cfg runtimeConfig, req tui.RerunRequest) error {
+	if strings.TrimSpace(req.RunID) == "" || strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Branch) == "" || strings.TrimSpace(req.SHA) == "" {
 		return errors.New("invalid restart request")
+	}
+
+	jobRow, err := findJobByRunID(dbRepo, req.RunID)
+	if err != nil {
+		return err
+	}
+	status := strings.ToLower(strings.TrimSpace(jobRow.Status))
+	if status != core.StatusFailed && status != core.StatusCanceled {
+		return fmt.Errorf("job status is %q; only failed/canceled jobs can be restarted", jobRow.Status)
+	}
+
+	latestJob, err := dbRepo.LatestJobByNameBranch(cfg.Repo, req.Name, req.Branch)
+	if err != nil {
+		return err
+	}
+	latestStatus := strings.ToLower(strings.TrimSpace(latestJob.Status))
+	if latestJob.RunID != "" && latestJob.RunID != jobRow.RunID && (latestStatus == core.StatusRunning || latestStatus == core.StatusPending) {
+		return fmt.Errorf("latest job %s/%s is %q; cancel it before restarting an older run", req.Name, req.Branch, latestJob.Status)
 	}
 
 	jobConfs, err := core.LoadJobConfsFromRepo(ctx, cfg.Repo, "HEAD")
@@ -522,7 +540,7 @@ func rerunJob(ctx context.Context, runner *core.JobRunner, cfg runtimeConfig, re
 	}
 	jobConf.Repo = cfg.Repo
 
-	if err := runner.RerunJob(jobConf, cfg.Env, req.Branch); err != nil {
+	if err := runner.RerunJob(jobConf, cfg.Env, req.Branch, jobRow.SHA); err != nil {
 		return err
 	}
 	return nil
@@ -532,23 +550,23 @@ func cancelJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, 
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
-	if strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Branch) == "" || strings.TrimSpace(req.SHA) == "" {
+	if strings.TrimSpace(req.RunID) == "" {
 		return errors.New("invalid cancel request")
 	}
 
-	jobRow, err := findJobByKey(dbRepo, strings.TrimSpace(req.Repo), req.Name, req.Branch, req.SHA)
+	jobRow, err := findJobByRunID(dbRepo, req.RunID)
 	if err != nil {
 		return err
 	}
-	status := strings.ToLower(jobRow.Status)
+	status := strings.ToLower(strings.TrimSpace(jobRow.Status))
 	if status != core.StatusRunning && status != core.StatusPending {
 		return fmt.Errorf("job status is %q; only running/pending jobs can be canceled", jobRow.Status)
 	}
 
-	if err := runner.Cancel(jobRow.Repo, jobRow.Name, jobRow.Branch, jobRow.SHA); err == nil {
+	if err := runner.Cancel(jobRow); err == nil {
 		return nil
 	} else if strings.Contains(err.Error(), "job is not running") {
-		if err := dbRepo.UpdateJob(jobRow.Repo, jobRow.Name, jobRow.Branch, jobRow.SHA, core.StatusCanceled, "canceled by user (stale job state)"); err != nil {
+		if err := dbRepo.UpdateJob(jobRow.RunID, core.StatusCanceled, "canceled by user (stale job state)", ""); err != nil {
 			return err
 		}
 		return nil
@@ -570,7 +588,7 @@ func markRepoJobsCanceled(dbRepo core.DbRepo, repo, reason string, logf func(str
 			return canceled, err
 		}
 		for _, job := range jobs {
-			if err := dbRepo.UpdateJob(job.Repo, job.Name, job.Branch, job.SHA, core.StatusCanceled, reason); err != nil {
+			if err := dbRepo.UpdateJob(job.RunID, core.StatusCanceled, reason, ""); err != nil {
 				return canceled, err
 			}
 			canceled++
@@ -587,29 +605,19 @@ func markRepoJobsCanceled(dbRepo core.DbRepo, repo, reason string, logf func(str
 	return canceled, nil
 }
 
-func findJobByKey(dbRepo core.DbRepo, repo, name, branch, sha string) (core.Job, error) {
-	repoValue := strings.TrimSpace(repo)
-	nameValue := strings.TrimSpace(name)
-	branchValue := strings.TrimSpace(branch)
-	shaValue := strings.TrimSpace(sha)
-	if repoValue == "" || nameValue == "" || branchValue == "" || shaValue == "" {
-		return core.Job{}, errors.New("job repo/name/branch/sha are required")
+func findJobByRunID(dbRepo core.DbRepo, runID string) (core.Job, error) {
+	runIDValue := strings.TrimSpace(runID)
+	if runIDValue == "" {
+		return core.Job{}, errors.New("job run id is required")
 	}
-
-	jobs, err := dbRepo.ListJob(core.JobFilter{
-		Repo:   repoValue,
-		Name:   nameValue,
-		Branch: branchValue,
-	})
+	job, err := dbRepo.JobByRunID(runIDValue)
 	if err != nil {
 		return core.Job{}, err
 	}
-	for _, j := range jobs {
-		if strings.TrimSpace(j.SHA) == shaValue {
-			return j, nil
-		}
+	if strings.TrimSpace(job.RunID) == "" {
+		return core.Job{}, fmt.Errorf("job not found: %s", runIDValue)
 	}
-	return core.Job{}, fmt.Errorf("job not found: %s/%s@%s", nameValue, branchValue, shortSHA(shaValue))
+	return job, nil
 }
 
 func findRerunJobConf(jobConfs []core.JobConf, name, branch string) (core.JobConf, error) {

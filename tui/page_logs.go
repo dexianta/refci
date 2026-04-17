@@ -232,6 +232,7 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			return m, requestRerunCmd(m.rerunCh, RerunRequest{
+				RunID:  job.RunID,
 				Repo:   job.Repo,
 				Name:   job.Name,
 				Branch: job.Branch,
@@ -249,6 +250,7 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			return m, requestCancelCmd(m.cancelCh, CancelRequest{
+				RunID:  job.RunID,
 				Repo:   job.Repo,
 				Name:   job.Name,
 				Branch: job.Branch,
@@ -614,6 +616,9 @@ func readTail(path string, max int) ([]string, error) {
 }
 
 func pathForJob(job core.Job) string {
+	if logPath := strings.TrimSpace(job.LogPath); logPath != "" {
+		return logPath
+	}
 	msg := job.Msg
 	if msg != "" {
 		if _, err := os.Stat(msg); err == nil {

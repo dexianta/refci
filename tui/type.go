@@ -8,6 +8,7 @@ type StatusEvent struct {
 }
 
 type RerunRequest struct {
+	RunID  string
 	Repo   string
 	Name   string
 	Branch string
@@ -15,6 +16,7 @@ type RerunRequest struct {
 }
 
 type CancelRequest struct {
+	RunID  string
 	Repo   string
 	Name   string
 	Branch string
