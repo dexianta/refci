@@ -39,8 +39,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		printMainUsage(os.Stdout)
-		return nil
+		return runMonitorPicker()
 	}
 	if isHelpArg(args[0]) || args[0] == "help" {
 		printMainUsage(os.Stdout)
@@ -156,6 +155,9 @@ func runPollLoop(args []string) error {
 	}
 
 	rest := fs.Args()
+	if len(rest) == 0 && *monitorMode {
+		return runMonitorPicker()
+	}
 	if len(rest) != 1 {
 		printPollUsage(os.Stderr)
 		return errors.New("poll mode requires exactly one repo target")
@@ -324,6 +326,96 @@ func runPollLoop(args []string) error {
 	}()
 
 	if err := tui.Run(uiCtx, cfg.Repo, dbRepo, statusCh, rerunCh, cancelCh); err != nil {
+		stop()
+		cancelUI()
+		<-done
+		return err
+	}
+	stop()
+	cancelUI()
+	<-done
+	return nil
+}
+
+func runMonitorPicker() error {
+	db, dbRepo, err := openDB()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+	uiCtx, cancelUI := context.WithCancel(ctx)
+	defer cancelUI()
+
+	rerunCh := make(chan tui.RerunRequest, 8)
+	cancelCh := make(chan tui.CancelRequest, 8)
+	statusCh := make(chan tui.StatusEvent, 8)
+	done := make(chan struct{})
+
+	reportStatus := func(msg string, isErr bool) {
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case statusCh <- tui.StatusEvent{Message: msg, IsError: isErr}:
+		default:
+		}
+	}
+
+	go func() {
+		defer close(done)
+		defer close(statusCh)
+
+		runners := map[string]*core.JobRunner{}
+		getRunner := func(repo string) (*core.JobRunner, error) {
+			repo = strings.TrimSpace(repo)
+			if repo == "" {
+				return nil, errors.New("repo is required")
+			}
+			if runner := runners[repo]; runner != nil {
+				return runner, nil
+			}
+			logger, err := core.NewCIActivityLogger(repo)
+			if err != nil {
+				return nil, err
+			}
+			runner := core.NewJobRunner(dbRepo)
+			runner.SetLogger(logger.Logf)
+			runners[repo] = runner
+			return runner, nil
+		}
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case req := <-rerunCh:
+				runner, err := getRunner(req.Repo)
+				if err == nil {
+					err = rerunJob(ctx, dbRepo, runner, runtimeConfig{Repo: req.Repo}, req)
+				}
+				if err != nil {
+					reportStatus(fmt.Sprintf("restart failed for %s/%s: %v", req.Name, req.Branch, err), true)
+					continue
+				}
+				reportStatus(fmt.Sprintf("restart started for %s/%s", req.Name, req.Branch), false)
+			case req := <-cancelCh:
+				runner, err := getRunner(req.Repo)
+				if err == nil {
+					err = cancelJob(ctx, dbRepo, runner, req)
+				}
+				if err != nil {
+					reportStatus(fmt.Sprintf("cancel failed for %s/%s@%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err), true)
+					continue
+				}
+				reportStatus(fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)), false)
+			}
+		}
+	}()
+
+	if err := tui.RunRepoPicker(uiCtx, dbRepo, statusCh, rerunCh, cancelCh); err != nil {
 		stop()
 		cancelUI()
 		<-done
@@ -878,10 +970,11 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintf(w, "refci v%s - local CI runner\n", appVersion)
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
+	fmt.Fprintln(w, "  refci")
 	fmt.Fprintln(w, "  refci init [path]")
 	fmt.Fprintln(w, "  refci clone -i <ssh-private-key> <git-repo-url>")
 	fmt.Fprintln(w, "  refci -e <env_file> [-interval 3s] <repo-target>")
-	fmt.Fprintln(w, "  refci --monitor <repo-target>")
+	fmt.Fprintln(w, "  refci --monitor [repo-target]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Repo target:")
 	fmt.Fprintln(w, "  owner/repo | owner--repo | repos/owner--repo | /abs/path/to/repos/owner--repo")
@@ -889,6 +982,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "Examples:")
 	fmt.Fprintln(w, "  refci init .")
 	fmt.Fprintln(w, "  refci clone -i ~/.ssh/refci-owner-repo git@github.com:owner/repo.git")
+	fmt.Fprintln(w, "  refci")
 	fmt.Fprintln(w, "  refci -e .env owner/repo")
 	fmt.Fprintln(w, "  refci --monitor owner/repo")
 	fmt.Fprintln(w, "")
@@ -914,7 +1008,7 @@ func printCloneUsage(w io.Writer) {
 
 func printPollUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: refci -e <env_file> [-interval 3s] <repo-target>")
-	fmt.Fprintln(w, "       refci --monitor <repo-target>")
+	fmt.Fprintln(w, "       refci --monitor [repo-target]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")
 	fmt.Fprintln(w, "  -e string")

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -39,6 +40,28 @@ func InitRoot(path string) error {
 	}
 
 	return nil
+}
+
+func ListLocalRepos() ([]string, error) {
+	reposDir := LocalPath("repos")
+	entries, err := os.ReadDir(reposDir)
+	if err != nil {
+		return nil, fmt.Errorf("list repos dir %q: %w", reposDir, err)
+	}
+
+	repos := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		name := strings.TrimSpace(entry.Name())
+		if name == "" || strings.HasPrefix(name, ".") {
+			continue
+		}
+		repos = append(repos, strings.ReplaceAll(name, "--", "/"))
+	}
+	sort.Strings(repos)
+	return repos, nil
 }
 
 func resolveRootPath(path string) (string, error) {

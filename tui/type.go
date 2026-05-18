@@ -30,6 +30,11 @@ type loadRepoJobsMsg struct {
 	err      error
 }
 
+type loadRepoListMsg struct {
+	repos []string
+	err   error
+}
+
 type loadJobLogMsg struct {
 	path  string
 	lines []string
