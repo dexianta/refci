@@ -46,8 +46,12 @@ This creates:
 ### 3) Clone a repo mirror
 
 ```bash
-refci clone git@github.com:owner/repo.git
+ssh-keygen -t ed25519 -f ~/.ssh/refci-owner-repo -C refci-owner-repo
+refci clone -i ~/.ssh/refci-owner-repo git@github.com:owner/repo.git
 ```
+
+Add `~/.ssh/refci-owner-repo.pub` as the GitHub deploy key for `owner/repo` before cloning.
+`refci clone` writes a managed host alias to `~/.ssh/config`, then stores the mirror's `origin` as `git@refci-owner--repo:owner/repo.git` so future fetches use the same deploy key.
 
 ### 4) Add job config to the repo
 

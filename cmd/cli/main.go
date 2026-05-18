@@ -27,7 +27,7 @@ type runtimeConfig struct {
 const appVersion = "0.5.4"
 
 // - refci init (for init root)
-// - refci clone <git-repo> (this download the code into repos folder)
+// - refci clone -i <ssh-key> <git-repo> (this download the code into repos folder)
 // - refci -e <env_path>  <repos/repo_name>  // to start running poll for this one repo
 // - future direction: parse each repos root/.refci folder, and generate .env file, the bash script file name can match the branch pattern
 func main() {
@@ -88,16 +88,34 @@ func runInit(args []string) error {
 }
 
 func runClone(args []string) error {
-	if len(args) == 1 && isHelpArg(args[0]) {
-		printCloneUsage(os.Stdout)
-		return nil
+	fs := flag.NewFlagSet("clone", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	var identityPath string
+	fs.StringVar(&identityPath, "i", "", "ssh private key path")
+	fs.StringVar(&identityPath, "identity", "", "ssh private key path")
+	fs.StringVar(&identityPath, "ssh-key", "", "ssh private key path")
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			printCloneUsage(os.Stdout)
+			return nil
+		}
+		printCloneUsage(os.Stderr)
+		return err
 	}
-	if len(args) != 1 {
+
+	rest := fs.Args()
+	if len(rest) != 1 {
 		printCloneUsage(os.Stderr)
 		return errors.New("clone requires exactly one git URL")
 	}
 
-	repoURL := strings.TrimSpace(args[0])
+	keyPath, err := normalizeSSHIdentityPath(identityPath)
+	if err != nil {
+		printCloneUsage(os.Stderr)
+		return err
+	}
+
+	repoURL := strings.TrimSpace(rest[0])
 	repo := core.ParseGithubUrl(repoURL)
 	if repo == "" {
 		return fmt.Errorf("invalid github URL: %q", repoURL)
@@ -108,10 +126,16 @@ func runClone(args []string) error {
 	}
 
 	mirrorPath := filepath.Join(core.Root, "repos", core.ToLocalRepo(repo))
-	if err := core.CloneMirror(context.Background(), repoURL, mirrorPath); err != nil {
+	sshHost := refciSSHHostAlias(repo)
+	if err := ensureRefciSSHHost(sshHost, keyPath); err != nil {
+		return err
+	}
+	cloneURL := githubSSHURLForHost(sshHost, repo)
+	if err := core.CloneMirror(context.Background(), cloneURL, mirrorPath); err != nil {
 		return err
 	}
 
+	fmt.Printf("configured ssh host %s with %s\n", sshHost, keyPath)
 	fmt.Printf("cloned %s into %s\n", repo, mirrorPath)
 	return nil
 }
@@ -356,10 +380,164 @@ func fetchMirror(ctx context.Context, mirrorPath string) error {
 		if !os.IsNotExist(err) {
 			return fmt.Errorf("stat mirror path: %w", err)
 		}
-		return fmt.Errorf("repo mirror not found (%s), run: refci clone <git-repo>", mirrorPath)
+		return fmt.Errorf("repo mirror not found (%s), run: refci clone -i <ssh-private-key> <git-repo>", mirrorPath)
 	}
 
 	return core.FetchMirror(ctx, mirrorPath)
+}
+
+func normalizeSSHIdentityPath(path string) (string, error) {
+	raw := strings.TrimSpace(path)
+	if raw == "" {
+		return "", errors.New("clone requires -i <ssh-private-key>")
+	}
+
+	expanded, err := expandHomePath(raw)
+	if err != nil {
+		return "", err
+	}
+	abs, err := filepath.Abs(expanded)
+	if err != nil {
+		return "", fmt.Errorf("resolve ssh private key path: %w", err)
+	}
+	info, err := os.Stat(abs)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", fmt.Errorf("ssh private key not found: %s", abs)
+		}
+		return "", fmt.Errorf("stat ssh private key: %w", err)
+	}
+	if info.IsDir() {
+		return "", fmt.Errorf("ssh private key is a directory: %s", abs)
+	}
+	return abs, nil
+}
+
+func expandHomePath(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	if path == "~" {
+		return home, nil
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~/")), nil
+}
+
+func refciSSHHostAlias(repo string) string {
+	return "refci-" + core.ToLocalRepo(strings.ToLower(strings.TrimSpace(repo)))
+}
+
+func githubSSHURLForHost(host, repo string) string {
+	return fmt.Sprintf("git@%s:%s.git", strings.TrimSpace(host), strings.TrimSpace(repo))
+}
+
+func ensureRefciSSHHost(host, identityPath string) error {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("resolve home directory: %w", err)
+	}
+	sshDir := filepath.Join(home, ".ssh")
+	if err := os.MkdirAll(sshDir, 0o700); err != nil {
+		return fmt.Errorf("create ssh config dir: %w", err)
+	}
+
+	configPath := filepath.Join(sshDir, "config")
+	raw, err := os.ReadFile(configPath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("read ssh config: %w", err)
+	}
+
+	next, err := upsertRefciSSHHostBlock(string(raw), host, identityPath)
+	if err != nil {
+		return err
+	}
+	if string(raw) == next {
+		return nil
+	}
+	if err := os.WriteFile(configPath, []byte(next), 0o600); err != nil {
+		return fmt.Errorf("write ssh config: %w", err)
+	}
+	return nil
+}
+
+func upsertRefciSSHHostBlock(config, host, identityPath string) (string, error) {
+	host = strings.TrimSpace(host)
+	identityPath = strings.TrimSpace(identityPath)
+	if host == "" {
+		return "", errors.New("ssh host alias is required")
+	}
+	if identityPath == "" {
+		return "", errors.New("ssh identity path is required")
+	}
+
+	begin := refciSSHConfigBegin(host)
+	end := refciSSHConfigEnd(host)
+	block := refciSSHHostBlock(host, identityPath)
+	if start := strings.Index(config, begin); start >= 0 {
+		endStart := strings.Index(config[start:], end)
+		if endStart < 0 {
+			return "", fmt.Errorf("ssh config has incomplete refci block for %s", host)
+		}
+		endIdx := start + endStart + len(end)
+		for endIdx < len(config) && (config[endIdx] == '\n' || config[endIdx] == '\r') {
+			endIdx++
+		}
+		return config[:start] + block + config[endIdx:], nil
+	}
+
+	if sshConfigHasHost(config, host) {
+		return "", fmt.Errorf("ssh config already has Host %s; remove or rename it before running refci clone", host)
+	}
+
+	if strings.TrimSpace(config) == "" {
+		return block, nil
+	}
+	if !strings.HasSuffix(config, "\n") {
+		config += "\n"
+	}
+	return config + "\n" + block, nil
+}
+
+func refciSSHHostBlock(host, identityPath string) string {
+	return fmt.Sprintf(
+		"%s\nHost %s\n  HostName github.com\n  User git\n  IdentityFile %s\n  IdentitiesOnly yes\n%s\n",
+		refciSSHConfigBegin(host),
+		host,
+		identityPath,
+		refciSSHConfigEnd(host),
+	)
+}
+
+func refciSSHConfigBegin(host string) string {
+	return "# refci:begin " + strings.TrimSpace(host)
+}
+
+func refciSSHConfigEnd(host string) string {
+	return "# refci:end " + strings.TrimSpace(host)
+}
+
+func sshConfigHasHost(config, host string) bool {
+	host = strings.TrimSpace(host)
+	for _, line := range strings.Split(config, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 || !strings.EqualFold(fields[0], "Host") {
+			continue
+		}
+		for _, candidate := range fields[1:] {
+			if strings.EqualFold(candidate, host) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func openDB() (*sql.DB, core.DbRepo, error) {
@@ -701,7 +879,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  refci init [path]")
-	fmt.Fprintln(w, "  refci clone <git-repo-url>")
+	fmt.Fprintln(w, "  refci clone -i <ssh-private-key> <git-repo-url>")
 	fmt.Fprintln(w, "  refci -e <env_file> [-interval 3s] <repo-target>")
 	fmt.Fprintln(w, "  refci --monitor <repo-target>")
 	fmt.Fprintln(w, "")
@@ -710,7 +888,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Examples:")
 	fmt.Fprintln(w, "  refci init .")
-	fmt.Fprintln(w, "  refci clone git@github.com:owner/repo.git")
+	fmt.Fprintln(w, "  refci clone -i ~/.ssh/refci-owner-repo git@github.com:owner/repo.git")
 	fmt.Fprintln(w, "  refci -e .env owner/repo")
 	fmt.Fprintln(w, "  refci --monitor owner/repo")
 	fmt.Fprintln(w, "")
@@ -726,8 +904,12 @@ func printInitUsage(w io.Writer) {
 }
 
 func printCloneUsage(w io.Writer) {
-	fmt.Fprintln(w, "Usage: refci clone <git-repo-url>")
-	fmt.Fprintln(w, "Clone a mirror repo into <root>/repos.")
+	fmt.Fprintln(w, "Usage: refci clone -i <ssh-private-key> <git-repo-url>")
+	fmt.Fprintln(w, "Clone a mirror repo into <root>/repos and configure a per-repo SSH host alias.")
+	fmt.Fprintln(w, "")
+	fmt.Fprintln(w, "Flags:")
+	fmt.Fprintln(w, "  -i, --identity, --ssh-key string")
+	fmt.Fprintln(w, "      ssh private key path for this repo's GitHub deploy key")
 }
 
 func printPollUsage(w io.Writer) {
