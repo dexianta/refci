@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 )
 
 func TestLogsPagination(t *testing.T) {
@@ -31,5 +32,33 @@ func TestLogsPagination(t *testing.T) {
 	m, _, _ = m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
 	if m.selected != 40 {
 		t.Fatalf("selected = %d, want 40", m.selected)
+	}
+}
+
+func TestSelectedJobHighlightsEntireRow(t *testing.T) {
+	colorProfile := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(0)
+	defer lipgloss.SetColorProfile(colorProfile)
+
+	job := core.Job{
+		Name:         "build",
+		Branch:       "main",
+		SHA:          "123456789",
+		CommitAuthor: "Dex",
+		Status:       core.StatusFinished,
+	}
+	m := logsModel{jobs: []core.Job{job}}
+	line := strings.Join([]string{
+		fixedCell(job.Name, actionNameColWidth),
+		fixedCell(job.Branch, branchColWidth),
+		fixedCell(shortSHA(job.SHA), shaColWidth),
+		fixedCell(job.CommitAuthor, authorColWidth),
+		fixedCell(statusTag(job.Status), statusColWidth),
+		fixedCell("--", elapsedColWidth),
+		"--",
+	}, "  ")
+
+	if view := m.renderJobList(); !strings.Contains(view, selectedItemStyle.Render("> "+line)) {
+		t.Fatal("selected style does not cover the entire row")
 	}
 }

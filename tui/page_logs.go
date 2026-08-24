@@ -317,12 +317,17 @@ func (m logsModel) renderJobList() string {
 	lines := make([]string, 0, end-start)
 	now := time.Now()
 	for i, j := range m.jobs[start:end] {
-		nameCell := m.renderActionName(j.Name, actionNameColWidth)
+		selected := start+i == m.selected
+		nameCell := fixedCell(j.Name, actionNameColWidth)
 		branchCell := fixedCell(j.Branch, branchColWidth)
 		shaCell := fixedCell(shortSHA(j.SHA), shaColWidth)
 		authorCell := fixedCell(displayCommitAuthor(j.CommitAuthor), authorColWidth)
-		statusCell := renderStatusCell(j.Status, statusColWidth)
+		statusCell := fixedCell(statusTag(j.Status), statusColWidth)
 		elapsedCell := fixedCell(elapsedForJob(now, j), elapsedColWidth)
+		if !selected {
+			nameCell = m.renderActionName(j.Name, actionNameColWidth)
+			statusCell = renderStatusCell(j.Status, statusColWidth)
+		}
 
 		line := strings.Join([]string{
 			nameCell,
@@ -334,7 +339,7 @@ func (m logsModel) renderJobList() string {
 			timeAgo(now, j.Start),
 		}, "  ")
 
-		if start+i == m.selected {
+		if selected {
 			lines = append(lines, selectedItemStyle.Render("> "+line))
 		} else {
 			lines = append(lines, "  "+line)
