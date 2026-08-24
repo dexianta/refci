@@ -21,6 +21,11 @@ const (
 	logsModeCI
 )
 
+const (
+	jobsLimit   = 100
+	jobsPerPage = 20
+)
+
 type logsModel struct {
 	dbRepo   core.DbRepo
 	repo     string
@@ -60,7 +65,7 @@ func (m logsModel) Init() tea.Cmd {
 
 func loadRepoJobsCmd(dbRepo core.DbRepo, repo string) tea.Cmd {
 	return func() tea.Msg {
-		jobs, err := dbRepo.ListJob(core.JobFilter{Repo: repo, Limit: 10})
+		jobs, err := dbRepo.ListJob(core.JobFilter{Repo: repo, Limit: jobsLimit})
 		if err != nil {
 			return loadRepoJobsMsg{
 				repo: repo,
@@ -207,6 +212,16 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 		case "down":
 			m.selected = modIdx(m.selected, len(m.jobs), 1)
 			return m, nil, true
+		case "left", "pgup":
+			if m.selected/jobsPerPage > 0 {
+				m.selected = max(0, m.selected-jobsPerPage)
+			}
+			return m, nil, true
+		case "right", "pgdown":
+			if len(m.jobs) > 0 && m.selected/jobsPerPage < (len(m.jobs)-1)/jobsPerPage {
+				m.selected = min(len(m.jobs)-1, m.selected+jobsPerPage)
+			}
+			return m, nil, true
 		case "enter":
 			if len(m.jobs) == 0 {
 				return m, nil, true
@@ -278,6 +293,7 @@ func (m logsModel) help() string {
 
 	hints := []string{
 		renderHint("UP/DOWN", "move"),
+		renderHint("LEFT/RIGHT", "page"),
 		renderHint("ENTER", "job log"),
 		renderHint("L", "ci log"),
 		renderHint("R", "restart"),
@@ -296,9 +312,11 @@ const (
 )
 
 func (m logsModel) renderJobList() string {
-	lines := make([]string, 0, len(m.jobs))
+	start := m.selected / jobsPerPage * jobsPerPage
+	end := min(len(m.jobs), start+jobsPerPage)
+	lines := make([]string, 0, end-start)
 	now := time.Now()
-	for i, j := range m.jobs {
+	for i, j := range m.jobs[start:end] {
 		nameCell := m.renderActionName(j.Name, actionNameColWidth)
 		branchCell := fixedCell(j.Branch, branchColWidth)
 		shaCell := fixedCell(shortSHA(j.SHA), shaColWidth)
@@ -316,7 +334,7 @@ func (m logsModel) renderJobList() string {
 			timeAgo(now, j.Start),
 		}, "  ")
 
-		if i == m.selected {
+		if start+i == m.selected {
 			lines = append(lines, selectedItemStyle.Render("> "+line))
 		} else {
 			lines = append(lines, "  "+line)
@@ -335,7 +353,9 @@ func (m logsModel) renderJobList() string {
 		}
 	}
 
-	return renderRegion("Jobs", []string{strings.Join(lines, "\n")}, help, true)
+	pageCount := max(1, (len(m.jobs)+jobsPerPage-1)/jobsPerPage)
+	title := fmt.Sprintf("Jobs (page %d/%d)", start/jobsPerPage+1, pageCount)
+	return renderRegion(title, []string{strings.Join(lines, "\n")}, help, true)
 }
 
 func (m logsModel) renderActionName(name string, width int) string {

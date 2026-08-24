@@ -278,6 +278,7 @@ func (m topModel) logsFooter() string {
 	}
 	return footerBarStyle.Render(
 		renderHint("UP/DOWN", "move"),
+		renderHint("LEFT/RIGHT", "page"),
 		renderHint("ENTER", "job log"),
 		renderHint("L", "ci log"),
 		renderHint("R", "restart"),

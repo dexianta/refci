@@ -45,12 +45,20 @@ This creates:
 
 ### 3) Clone a repo mirror
 
+Generate a dedicated SSH keypair for the repo:
+
 ```bash
 ssh-keygen -t ed25519 -f ~/.ssh/refci-owner-repo -C refci-owner-repo
+```
+
+Add `~/.ssh/refci-owner-repo.pub` as a deploy key in the GitHub repository settings for `owner/repo`.
+
+After the deploy key is added, clone the mirror:
+
+```bash
 refci clone -i ~/.ssh/refci-owner-repo git@github.com:owner/repo.git
 ```
 
-Add `~/.ssh/refci-owner-repo.pub` as the GitHub deploy key for `owner/repo` before cloning.
 `refci clone` writes a managed host alias to `~/.ssh/config`, then stores the mirror's `origin` as `git@refci-owner--repo:owner/repo.git` so future fetches use the same deploy key.
 
 ### 4) Add job config to the repo
@@ -144,8 +152,9 @@ Internal runner activity is also appended to `logs/<repo>/ci.log` so you can ins
 ### 7) TUI
 
 Single logs page:
-- shows latest 10 jobs (most recent first), including commit author
+- shows the latest 100 jobs (most recent first), 20 per page, including commit author
 - `UP/DOWN`: select job
+- `LEFT/RIGHT` or `PGUP/PGDOWN`: change page
 - `ENTER`: open log detail (stream the last 200 line of the file each second)
 - `L`: open CI activity log detail (fetch/config/poll/queue lifecycle, refreshed each second)
 - `R`: rerun when the latest attempt for that job/branch is failed
