@@ -300,7 +300,7 @@ func (m logsModel) help() string {
 }
 
 const (
-	repoColWidth       = 22
+	repoColWidth       = 24
 	actionNameColWidth = 22
 	branchColWidth     = 12
 	shaColWidth        = 8
@@ -318,7 +318,11 @@ func (m logsModel) renderJobList() string {
 		selected := start+i == m.selected
 		cells := make([]string, 0, 8)
 		if m.repo == "" {
-			cells = append(cells, fixedCell(j.Repo, repoColWidth))
+			repoCell := fixedCell(strings.ReplaceAll(j.Repo, "/", " / "), repoColWidth)
+			if !selected {
+				repoCell = actionNameStyle(j.Repo, nil).Render(repoCell)
+			}
+			cells = append(cells, repoCell)
 		}
 		nameCell := fixedCell(j.Name, actionNameColWidth)
 		branchCell := fixedCell(j.Branch, branchColWidth)

@@ -49,9 +49,10 @@ func TestSelectedJobHighlightsEntireRow(t *testing.T) {
 		CommitAuthor: "Dex",
 		Status:       core.StatusFinished,
 	}
-	m := logsModel{jobs: []core.Job{job}}
+	otherJob := core.Job{Repo: "acme/web", Name: "test"}
+	m := logsModel{jobs: []core.Job{job, otherJob}}
 	line := strings.Join([]string{
-		fixedCell(job.Repo, repoColWidth),
+		fixedCell("acme / api", repoColWidth),
 		fixedCell(job.Name, actionNameColWidth),
 		fixedCell(job.Branch, branchColWidth),
 		fixedCell(shortSHA(job.SHA), shaColWidth),
@@ -61,8 +62,13 @@ func TestSelectedJobHighlightsEntireRow(t *testing.T) {
 		"--",
 	}, "  ")
 
-	if view := m.renderJobList(); !strings.Contains(view, selectedItemStyle.Render("> "+line)) {
+	view := m.renderJobList()
+	if !strings.Contains(view, selectedItemStyle.Render("> "+line)) {
 		t.Fatal("selected style does not cover the entire row")
+	}
+	styledRepo := actionNameStyle(otherJob.Repo, nil).Render(fixedCell("acme / web", repoColWidth))
+	if !strings.Contains(view, styledRepo) {
+		t.Fatal("unselected repo is not color styled")
 	}
 }
 
