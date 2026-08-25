@@ -14,8 +14,9 @@ func TestLogsPagination(t *testing.T) {
 	jobs := make([]core.Job, 45)
 	for i := range jobs {
 		jobs[i].Name = fmt.Sprintf("job-%03d", i)
+		jobs[i].Repo = fmt.Sprintf("repo-%d", i%2)
 	}
-	m := logsModel{repo: "repo", jobs: jobs}
+	m := logsModel{jobs: jobs}
 
 	m, _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRight})
 	if m.selected != 20 {
@@ -41,6 +42,7 @@ func TestSelectedJobHighlightsEntireRow(t *testing.T) {
 	defer lipgloss.SetColorProfile(colorProfile)
 
 	job := core.Job{
+		Repo:         "acme/api",
 		Name:         "build",
 		Branch:       "main",
 		SHA:          "123456789",
@@ -49,6 +51,7 @@ func TestSelectedJobHighlightsEntireRow(t *testing.T) {
 	}
 	m := logsModel{jobs: []core.Job{job}}
 	line := strings.Join([]string{
+		fixedCell(job.Repo, repoColWidth),
 		fixedCell(job.Name, actionNameColWidth),
 		fixedCell(job.Branch, branchColWidth),
 		fixedCell(shortSHA(job.SHA), shaColWidth),
@@ -60,5 +63,20 @@ func TestSelectedJobHighlightsEntireRow(t *testing.T) {
 
 	if view := m.renderJobList(); !strings.Contains(view, selectedItemStyle.Render("> "+line)) {
 		t.Fatal("selected style does not cover the entire row")
+	}
+}
+
+func TestRepoPickerModelStartsWithAllJobs(t *testing.T) {
+	m := newRepoPickerModel(nil, nil, nil, nil)
+	if m.mode != topModeLogs || !m.pickerEnabled || m.repo != "" {
+		t.Fatal("bare refci does not start in the all-repositories job view")
+	}
+}
+
+func TestAllReposCILogUsesSelectedJobRepo(t *testing.T) {
+	m := logsModel{jobs: []core.Job{{Repo: "acme/api"}}}
+	m, _, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'l'}})
+	if m.mode != logsModeCI || m.logPath != core.CIActivityLogPath("acme/api") {
+		t.Fatal("all-repositories CI log does not use the selected job's repo")
 	}
 }

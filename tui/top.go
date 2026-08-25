@@ -37,6 +37,8 @@ const (
 	topModeRepoPicker
 )
 
+const allReposLabel = "All repositories"
+
 type tickMsg time.Time
 
 func newModel(repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) topModel {
@@ -53,15 +55,9 @@ func newModel(repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, reru
 }
 
 func newRepoPickerModel(dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) topModel {
-	return topModel{
-		now:           time.Now(),
-		mode:          topModeRepoPicker,
-		pickerEnabled: true,
-		statusCh:      statusCh,
-		dbRepo:        dbRepo,
-		rerunCh:       rerunCh,
-		cancelCh:      cancelCh,
-	}
+	m := newModel("", dbRepo, statusCh, rerunCh, cancelCh)
+	m.pickerEnabled = true
+	return m
 }
 
 func Run(ctx context.Context, repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) error {
@@ -104,10 +100,8 @@ func (m topModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.repoListErr = ""
-		m.repos = msg.repos
-		if len(m.repos) == 0 {
-			m.selectedRepo = 0
-		} else if m.selectedRepo >= len(m.repos) {
+		m.repos = append([]string{""}, msg.repos...)
+		if m.selectedRepo >= len(m.repos) {
 			m.selectedRepo = len(m.repos) - 1
 		}
 		return m, nil
@@ -232,7 +226,11 @@ func (m topModel) View() string {
 
 	body := m.logsModel.View()
 	footer := lipgloss.JoinVertical(lipgloss.Top, m.logsFooter(), "", globalFooter)
-	repoLabel := sectionTitleStyle.Render(fmt.Sprint("\n", ">> "+m.repo, "\n"))
+	repo := m.repo
+	if repo == "" {
+		repo = allReposLabel
+	}
+	repoLabel := sectionTitleStyle.Render(fmt.Sprint("\n", ">> "+repo, "\n"))
 	return appStyle.Render(strings.Join([]string{
 		header,
 		repoLabel,
@@ -246,6 +244,9 @@ func (m topModel) View() string {
 func (m topModel) renderRepoPicker() string {
 	lines := make([]string, 0, len(m.repos))
 	for i, repo := range m.repos {
+		if repo == "" {
+			repo = allReposLabel
+		}
 		line := fixedCell(repo, 48)
 		if i == m.selectedRepo {
 			lines = append(lines, selectedItemStyle.Render("> "+line))

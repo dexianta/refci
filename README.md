@@ -94,7 +94,7 @@ Disable automatic fetch/poll (manual `R`/`C` in TUI still works, and no `.env` i
 refci --monitor ./repos/<repo-path>
 ```
 
-From a refci root, run without arguments to open a repo picker in monitor mode:
+From a refci root, run without arguments to monitor recent jobs across all repositories. Press `P` to open the repo picker:
 
 ```bash
 refci
@@ -152,13 +152,13 @@ Internal runner activity is also appended to `logs/<repo>/ci.log` so you can ins
 ### 7) TUI
 
 Single logs page:
-- shows the latest 100 jobs (most recent first), 20 per page, including commit author
+- shows the latest 100 jobs across all repositories (most recent first), 20 per page, including the source repo and commit author
 - `UP/DOWN`: select job
 - `LEFT/RIGHT` or `PGUP/PGDOWN`: change page
 - `ENTER`: open log detail (stream the last 200 line of the file each second)
-- `L`: open CI activity log detail (fetch/config/poll/queue lifecycle, refreshed each second)
+- `L`: open CI activity log detail for the current repo, or the selected job's repo in the all-repositories view
 - `R`: rerun when the latest attempt for that job/branch is failed
 - `C`: cancel selected running/pending job
-- `ESC` or `P` (job list): return to repo picker when launched with `refci`
+- `ESC` or `P` (job list): open the repo picker when launched with `refci`
 - `ESC` or `ENTER` (detail): back
 - `CTRL+C`: quit

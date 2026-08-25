@@ -57,9 +57,6 @@ func newLogsModel(dbRepo core.DbRepo, repo string, rerunCh chan<- RerunRequest, 
 }
 
 func (m logsModel) Init() tea.Cmd {
-	if m.repo == "" {
-		return nil
-	}
 	return loadRepoJobsCmd(m.dbRepo, m.repo)
 }
 
@@ -183,19 +180,12 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 		return m, nil, true
 
 	case tickMsg:
-		if m.repo == "" {
-			return m, nil, false
-		}
 		if (m.mode == logsModeDetail || m.mode == logsModeCI) && strings.TrimSpace(m.logPath) != "" {
 			return m, loadJobLogCmd(m.logPath), true
 		}
 		return m, loadRepoJobsCmd(m.dbRepo, m.repo), true
 
 	case tea.KeyMsg:
-		if m.repo == "" {
-			return m, nil, false
-		}
-
 		if m.mode == logsModeDetail || m.mode == logsModeCI {
 			switch mg.String() {
 			case "esc", "enter", "backspace":
@@ -231,8 +221,15 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 			m.logRows = nil
 			return m, loadJobLogCmd(m.logPath), true
 		case "l", "L":
+			repo := m.repo
+			if repo == "" {
+				if len(m.jobs) == 0 {
+					return m, nil, true
+				}
+				repo = m.jobs[m.selected].Repo
+			}
 			m.mode = logsModeCI
-			m.logPath = core.CIActivityLogPath(m.repo)
+			m.logPath = core.CIActivityLogPath(repo)
 			m.logRows = nil
 			return m, loadJobLogCmd(m.logPath), true
 		case "r":
@@ -303,6 +300,7 @@ func (m logsModel) help() string {
 }
 
 const (
+	repoColWidth       = 22
 	actionNameColWidth = 22
 	branchColWidth     = 12
 	shaColWidth        = 8
@@ -318,6 +316,10 @@ func (m logsModel) renderJobList() string {
 	now := time.Now()
 	for i, j := range m.jobs[start:end] {
 		selected := start+i == m.selected
+		cells := make([]string, 0, 8)
+		if m.repo == "" {
+			cells = append(cells, fixedCell(j.Repo, repoColWidth))
+		}
 		nameCell := fixedCell(j.Name, actionNameColWidth)
 		branchCell := fixedCell(j.Branch, branchColWidth)
 		shaCell := fixedCell(shortSHA(j.SHA), shaColWidth)
@@ -329,7 +331,7 @@ func (m logsModel) renderJobList() string {
 			statusCell = renderStatusCell(j.Status, statusColWidth)
 		}
 
-		line := strings.Join([]string{
+		cells = append(cells,
 			nameCell,
 			branchCell,
 			shaCell,
@@ -337,7 +339,8 @@ func (m logsModel) renderJobList() string {
 			statusCell,
 			elapsedCell,
 			timeAgo(now, j.Start),
-		}, "  ")
+		)
+		line := strings.Join(cells, "  ")
 
 		if selected {
 			lines = append(lines, selectedItemStyle.Render("> "+line))
