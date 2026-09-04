@@ -151,8 +151,10 @@ Internal runner activity is also appended to `logs/<repo>/ci.log` so you can ins
 
 ### 7) TUI
 
-Single logs page:
-- shows the latest 100 jobs across all repositories (most recent first), 20 per page, including the source repo and commit author
+Jobs view:
+- bare `refci` shows the latest 100 jobs across all repositories, most recent first
+- the all-repositories view shows a color-coded `owner / repo` first column; choosing a repo from the picker filters the same view to that repo
+- shows 20 jobs per page, including commit author
 - `UP/DOWN`: select job
 - `LEFT/RIGHT` or `PGUP/PGDOWN`: change page
 - `ENTER`: open log detail (stream the last 200 line of the file each second)
