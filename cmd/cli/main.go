@@ -20,8 +20,9 @@ import (
 )
 
 type runtimeConfig struct {
-	Repo string
-	Env  []string
+	Repo       string
+	Env        []string
+	MirrorPath string
 }
 
 const appVersion = "0.5.4"
@@ -160,7 +161,7 @@ func runPollLoop(args []string) error {
 	}
 	if len(rest) != 1 {
 		printPollUsage(os.Stderr)
-		return errors.New("poll mode requires exactly one repo target")
+		return errors.New("poll mode requires exactly one repo target or YAML config file")
 	}
 	if *interval <= 0 {
 		return errors.New("interval must be > 0")
@@ -172,169 +173,61 @@ func runPollLoop(args []string) error {
 	}
 	defer db.Close()
 
-	repo, mirrorPath, err := resolveRepoTarget(rest[0])
-	if err != nil {
-		return err
-	}
-
-	cfg := runtimeConfig{Repo: repo}
-	ciLogger, err := core.NewCIActivityLogger(repo)
-	if err != nil {
-		return err
-	}
-	runner := core.NewJobRunner(dbRepo)
-	runner.SetLogger(ciLogger.Logf)
-	if !*monitorMode {
-		cfg, err = parseRuntimeConfig(repo, *envPath)
-		if err != nil {
-			return err
+	configs := []runtimeConfig{}
+	configMode := isWorkerConfig(rest[0])
+	if configMode {
+		if *monitorMode {
+			return errors.New("use refci --monitor without a config file to monitor all repositories")
 		}
+		var hasEnvFlag bool
+		fs.Visit(func(f *flag.Flag) { hasEnvFlag = hasEnvFlag || f.Name == "e" })
+		if hasEnvFlag {
+			return errors.New("set env per repository in the YAML config instead of using -e")
+		}
+		configs, err = loadWorkerConfigs(rest[0])
+	} else {
+		var cfg runtimeConfig
+		cfg, err = loadRepoRuntimeConfig(rest[0], *envPath, *monitorMode)
+		configs = append(configs, cfg)
+	}
+	if err != nil {
+		return err
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	uiCtx, cancelUI := context.WithCancel(ctx)
-	defer cancelUI()
-
 	rerunCh := make(chan tui.RerunRequest, 8)
 	cancelCh := make(chan tui.CancelRequest, 8)
 	statusCh := make(chan tui.StatusEvent, 8)
-	done := make(chan struct{})
-
-	reportStatus := func(msg string, isErr bool) {
-		if ctx.Err() != nil {
-			return
-		}
-		select {
-		case statusCh <- tui.StatusEvent{Message: msg, IsError: isErr}:
-		default:
-		}
-	}
-
-	if !*monitorMode {
-		staleCount, err := markRepoJobsCanceled(dbRepo, cfg.Repo, "worker restarted before job completion", ciLogger.Logf)
-		if err != nil {
-			return err
-		}
-		if staleCount > 0 {
-			reportStatus(fmt.Sprintf("marked %d stale jobs as canceled", staleCount), false)
-		}
-	}
-
-	modeLabel := "poll"
-	if *monitorMode {
-		modeLabel = "monitor"
-	}
-	ciLogger.Logf("worker start repo=%s mode=%s interval=%s", cfg.Repo, modeLabel, interval.String())
-
-	go func() {
-		defer close(done)
-		defer close(statusCh)
-
-		doPoll := func() {}
-		var ticker *time.Ticker
-		var tickerCh <-chan time.Time
-		lastErr := ""
-
-		if !*monitorMode {
-			doPoll = func() {
-				var loopErr error
-				started := time.Now()
-				ciLogger.Logf("poll tick start")
-
-				fetchStarted := time.Now()
-				ciLogger.Logf("fetch mirror start path=%s", mirrorPath)
-				if err := fetchMirror(ctx, mirrorPath); err != nil {
-					ciLogger.Logf("fetch mirror failed after %s: %v", time.Since(fetchStarted).Round(time.Millisecond), err)
-					loopErr = fmt.Errorf("fetch mirror: %w", err)
-				} else {
-					ciLogger.Logf("fetch mirror done in %s", time.Since(fetchStarted).Round(time.Millisecond))
-					loadStarted := time.Now()
-					ciLogger.Logf("load job config start ref=HEAD")
-					jobs, err := core.LoadJobConfsFromRepo(ctx, cfg.Repo, "HEAD")
-					if err != nil {
-						ciLogger.Logf("load job config failed after %s: %v", time.Since(loadStarted).Round(time.Millisecond), err)
-						loopErr = fmt.Errorf("load .refci/conf.yml: %w", err)
-					} else if len(jobs) == 0 {
-						ciLogger.Logf("load job config done in %s count=0", time.Since(loadStarted).Round(time.Millisecond))
-						loopErr = fmt.Errorf("no jobs found in .refci/conf.yml for %s", cfg.Repo)
-					} else {
-						ciLogger.Logf("load job config done in %s count=%d", time.Since(loadStarted).Round(time.Millisecond), len(jobs))
-						if err := pollOnce(ctx, dbRepo, runner, cfg, jobs, ciLogger.Logf); err != nil {
-							loopErr = fmt.Errorf("poll failed: %w", err)
-						}
-					}
-				}
-
-				if loopErr != nil {
-					msg := loopErr.Error()
-					ciLogger.Logf("poll tick failed after %s: %v", time.Since(started).Round(time.Millisecond), loopErr)
-					if msg != lastErr {
-						reportStatus(msg+" (will retry)", true)
-						lastErr = msg
-					}
-				} else if lastErr != "" {
-					// clear previously shown transient error once poll succeeds again
-					ciLogger.Logf("poll tick recovered in %s", time.Since(started).Round(time.Millisecond))
-					reportStatus("", false)
-					lastErr = ""
-				} else {
-					ciLogger.Logf("poll tick done in %s", time.Since(started).Round(time.Millisecond))
-				}
-			}
-
-			doPoll()
-			ticker = time.NewTicker(*interval)
-			tickerCh = ticker.C
-			defer ticker.Stop()
-		}
-
-		for {
-			select {
-			case <-ctx.Done():
-				if !*monitorMode {
-					if count, err := markRepoJobsCanceled(dbRepo, cfg.Repo, "worker stopped before job completion", ciLogger.Logf); err != nil {
-						ciLogger.Logf("worker stop cleanup failed: %v", err)
-					} else if count > 0 {
-						ciLogger.Logf("worker stop cleanup marked=%d", count)
-					}
-				}
-				ciLogger.Logf("worker stop")
-				return
-			case req := <-rerunCh:
-				ciLogger.Logf("rerun requested job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
-				if err := rerunJob(ctx, dbRepo, runner, cfg, req); err != nil {
-					ciLogger.Logf("rerun failed job=%s branch=%s sha=%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err)
-					reportStatus(fmt.Sprintf("restart failed for %s/%s: %v", req.Name, req.Branch, err), true)
-					continue
-				}
-				ciLogger.Logf("rerun started job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
-				reportStatus(fmt.Sprintf("restart started for %s/%s", req.Name, req.Branch), false)
-			case req := <-cancelCh:
-				ciLogger.Logf("cancel requested job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
-				if err := cancelJob(ctx, dbRepo, runner, req); err != nil {
-					ciLogger.Logf("cancel failed job=%s branch=%s sha=%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err)
-					reportStatus(fmt.Sprintf("cancel failed for %s/%s@%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err), true)
-					continue
-				}
-				ciLogger.Logf("cancel accepted job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
-				reportStatus(fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)), false)
-			case <-tickerCh:
-				doPoll()
-			}
-		}
-	}()
-
-	if err := tui.Run(uiCtx, cfg.Repo, dbRepo, statusCh, rerunCh, cancelCh); err != nil {
+	workers := make(map[string]*repoWorker, len(configs))
+	defer func() {
 		stop()
-		cancelUI()
-		<-done
-		return err
+		for _, worker := range workers {
+			<-worker.done
+		}
+		close(statusCh)
+	}()
+	for _, cfg := range configs {
+		worker, err := startRepoWorker(ctx, dbRepo, cfg, *interval, *monitorMode, statusCh)
+		if err != nil {
+			return fmt.Errorf("%s: %w", cfg.Repo, err)
+		}
+		workers[cfg.Repo] = worker
 	}
-	stop()
-	cancelUI()
-	<-done
-	return nil
+
+	routerDone := make(chan struct{})
+	go func() {
+		defer close(routerDone)
+		routeWorkerRequests(ctx, workers, statusCh, rerunCh, cancelCh)
+	}()
+	defer func() {
+		stop()
+		<-routerDone
+	}()
+	if configMode {
+		return tui.RunRepoPicker(ctx, dbRepo, statusCh, rerunCh, cancelCh)
+	}
+	return tui.Run(ctx, configs[0].Repo, dbRepo, statusCh, rerunCh, cancelCh)
 }
 
 func runMonitorPicker() error {
@@ -974,6 +867,7 @@ func printMainUsage(w io.Writer) {
 	fmt.Fprintln(w, "  refci init [path]")
 	fmt.Fprintln(w, "  refci clone -i <ssh-private-key> <git-repo-url>")
 	fmt.Fprintln(w, "  refci -e <env_file> [-interval 3s] <repo-target>")
+	fmt.Fprintln(w, "  refci [-interval 3s] config.yml")
 	fmt.Fprintln(w, "  refci --monitor [repo-target]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Repo target:")
@@ -1008,6 +902,7 @@ func printCloneUsage(w io.Writer) {
 
 func printPollUsage(w io.Writer) {
 	fmt.Fprintln(w, "Usage: refci -e <env_file> [-interval 3s] <repo-target>")
+	fmt.Fprintln(w, "       refci [-interval 3s] config.yml")
 	fmt.Fprintln(w, "       refci --monitor [repo-target]")
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Flags:")

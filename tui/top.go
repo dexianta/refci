@@ -61,7 +61,7 @@ func newRepoPickerModel(dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh
 }
 
 func Run(ctx context.Context, repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) error {
-	p := tea.NewProgram(newModel(repo, dbRepo, statusCh, rerunCh, cancelCh), tea.WithAltScreen(), tea.WithContext(ctx))
+	p := tea.NewProgram(newModel(repo, dbRepo, statusCh, rerunCh, cancelCh), tea.WithAltScreen(), tea.WithContext(ctx), tea.WithoutSignalHandler())
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
 		return nil
@@ -70,7 +70,7 @@ func Run(ctx context.Context, repo string, dbRepo core.DbRepo, statusCh <-chan S
 }
 
 func RunRepoPicker(ctx context.Context, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) error {
-	p := tea.NewProgram(newRepoPickerModel(dbRepo, statusCh, rerunCh, cancelCh), tea.WithAltScreen(), tea.WithContext(ctx))
+	p := tea.NewProgram(newRepoPickerModel(dbRepo, statusCh, rerunCh, cancelCh), tea.WithAltScreen(), tea.WithContext(ctx), tea.WithoutSignalHandler())
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
 		return nil

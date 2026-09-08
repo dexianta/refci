@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -18,12 +19,12 @@ func TestSQLiteRepoAllowsMultipleRunsPerSHA(t *testing.T) {
 	}
 
 	const (
-		run1 = "run-1"
-		run2 = "run-2"
+		run1     = "run-1"
+		run2     = "run-2"
 		repoName = "acme/refci"
-		jobName = "build"
-		branch = "main"
-		sha = "deadbeefcafebabe"
+		jobName  = "build"
+		branch   = "main"
+		sha      = "deadbeefcafebabe"
 	)
 
 	if err := repo.CreateJob(run1, repoName, jobName, branch, sha, "alice"); err != nil {
@@ -240,6 +241,44 @@ func TestJobRunnerKillsBackgroundWritersOnExit(t *testing.T) {
 	}
 	if strings.Contains(logText, "child-after-exit") {
 		t.Fatalf("log contains leaked child output after parent exit: %q", logText)
+	}
+}
+
+func TestJobRunnerStopWaitsForProcessesAndStatus(t *testing.T) {
+	oldRoot := Root
+	Root = t.TempDir()
+	defer func() { Root = oldRoot }()
+	repo, err := NewSQLiteRepo(openTestDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(Root, "job.sh")
+	if err := os.WriteFile(script, []byte("sleep 60\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewJobRunner(repo)
+	defer runner.Stop()
+	pids := map[string]int{}
+	for _, runID := range []string{"first", "second"} {
+		if _, err := runner.Start(context.Background(), RunJobRequest{
+			RunID: runID, Repo: "acme/test", Name: "build", Branch: runID,
+			SHA: "abc123", ScriptPath: script, WorkDir: Root,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		runner.mu.Lock()
+		pids[runID] = runner.running[runID].cmd.Process.Pid
+		runner.mu.Unlock()
+	}
+	runner.Stop()
+	for runID, pid := range pids {
+		if err := syscall.Kill(pid, 0); err != syscall.ESRCH {
+			t.Errorf("process %d is still present after Stop: %v", pid, err)
+		}
+		job, err := repo.JobByRunID(runID)
+		if err != nil || job.Status != StatusCanceled || runner.IsRunning(runID) {
+			t.Errorf("job %s did not finish cancellation: %+v, %v", runID, job, err)
+		}
 	}
 }
 

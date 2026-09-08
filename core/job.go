@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,10 +30,10 @@ type RunJobRequest struct {
 }
 
 type JobRunner struct {
-	dbRepo            DbRepo
-	cancelGrace       time.Duration
-	exitCleanupGrace  time.Duration
-	logf              func(string, ...any)
+	dbRepo           DbRepo
+	cancelGrace      time.Duration
+	exitCleanupGrace time.Duration
+	logf             func(string, ...any)
 
 	mu      sync.Mutex
 	running map[string]*runningJob
@@ -244,6 +245,23 @@ func (r *JobRunner) IsRunning(runID string) bool {
 	defer r.mu.Unlock()
 	_, ok := r.running[key]
 	return ok
+}
+
+// Stop cancels this runner's jobs and waits for their processes and DB updates.
+// The caller must stop queuing jobs before calling Stop.
+func (r *JobRunner) Stop() {
+	r.mu.Lock()
+	running := maps.Clone(r.running)
+	r.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for runID, job := range running {
+		wg.Go(func() {
+			_ = r.Cancel(Job{RunID: runID})
+			<-job.done
+		})
+	}
+	wg.Wait()
 }
 
 func (r *JobRunner) waitJob(req RunJobRequest, key string, rj *runningJob, logFile *os.File) {

@@ -88,6 +88,35 @@ From the refci root, run with the repo path:
 refci -e .env ./repos/<repo-path>
 ```
 
+To run several repositories in one process, create `config.yml`:
+
+```yaml
+backend:
+  repo: ./repos/owner--backend
+  env: ./backend.env
+frontend:
+  repo: ./repos/owner--frontend
+  env: ./frontend.env
+```
+
+From the refci root, start all workers with one command:
+
+```bash
+refci config.yml
+# Optional shared poll interval:
+refci -interval 5s config.yml
+```
+
+Each named entry requires `repo` and `env`. Paths are relative to the current
+refci root, just like the single-repo command; absolute paths also work. All
+repositories must belong to that root. `.yml` and `.yaml` are supported.
+Refci validates all env files and rejects duplicate repositories before starting.
+Each repository has its own polling goroutine, env, runner, and CI activity log.
+Fetch/poll errors retry independently. One shared TUI shows all repositories;
+restart/cancel actions use the selected repository's worker and env. Repositories
+outside the config remain visible, but cannot be restarted or canceled there.
+Ctrl+C or SIGTERM stops every worker and its running jobs.
+
 Disable automatic fetch/poll (manual `R`/`C` in TUI still works, and no `.env` is required):
 
 ```bash
@@ -127,7 +156,7 @@ Worker lifecycle:
 For daemon-style usage, run `refci` in `tmux`:
 
 ```bash
-tmux new -d -s refci 'cd /path/to/refci-root && refci -e .env ./repos/<repo-path>'
+tmux new -d -s refci 'cd /path/to/refci-root && refci config.yml'
 tmux attach -t refci
 ```
 
