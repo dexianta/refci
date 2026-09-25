@@ -3,81 +3,30 @@ package core
 import (
 	"database/sql"
 	"fmt"
-	"strings"
 
-	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "modernc.org/sqlite"
 )
 
-type DBKind string
-
-const (
-	DBSQLite   DBKind = "sqlite"
-	DBPostgres DBKind = "postgres"
-)
-
-type DBConfig struct {
-	Kind DBKind
-
-	// SQLitePath is used when Kind == DBSQLite.
-	SQLitePath string
-
-	// PostgresDSN is used when Kind == DBPostgres.
-	PostgresDSN string
-}
-
-// OpenDB returns a *sql.DB for sqlite or postgres based on config.
-func OpenDB(cfg DBConfig) (*sql.DB, error) {
-	driverName, dsn, err := resolveDriver(cfg)
-	if err != nil {
-		return nil, err
-	}
-
-	db, err := sql.Open(driverName, dsn)
+// OpenDB opens the sqlite database at path.
+func OpenDB(path string) (*sql.DB, error) {
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return nil, fmt.Errorf("open db: %w", err)
 	}
 
-	if driverName == "sqlite" {
-		db.SetMaxOpenConns(1)
-		db.SetMaxIdleConns(1)
-		if _, err := db.Exec(`PRAGMA busy_timeout = 5000`); err != nil {
+	// A single connection keeps the pragmas below in effect for every query.
+	db.SetMaxOpenConns(1)
+	db.SetMaxIdleConns(1)
+	for _, pragma := range []string{
+		`PRAGMA busy_timeout = 5000`,
+		`PRAGMA journal_mode = WAL`,
+		`PRAGMA synchronous = NORMAL`,
+	} {
+		if _, err := db.Exec(pragma); err != nil {
 			_ = db.Close()
-			return nil, fmt.Errorf("set sqlite busy_timeout: %w", err)
+			return nil, fmt.Errorf("%s: %w", pragma, err)
 		}
-		if _, err := db.Exec(`PRAGMA journal_mode = WAL`); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("set sqlite journal_mode: %w", err)
-		}
-		if _, err := db.Exec(`PRAGMA synchronous = NORMAL`); err != nil {
-			_ = db.Close()
-			return nil, fmt.Errorf("set sqlite synchronous: %w", err)
-		}
-	}
-
-	if err := db.Ping(); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("ping db: %w", err)
 	}
 
 	return db, nil
-}
-
-func resolveDriver(cfg DBConfig) (driverName string, dsn string, err error) {
-	switch cfg.Kind {
-	case DBSQLite:
-		path := strings.TrimSpace(cfg.SQLitePath)
-		if path == "" {
-			path = "refci.db"
-		}
-		return "sqlite", path, nil
-	case DBPostgres:
-		dsn := strings.TrimSpace(cfg.PostgresDSN)
-		if dsn == "" {
-			return "", "", fmt.Errorf("postgres dsn is required")
-		}
-		return "pgx", dsn, nil
-	default:
-		return "", "", fmt.Errorf("unsupported db kind: %q", cfg.Kind)
-	}
 }

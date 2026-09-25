@@ -99,33 +99,25 @@ func (r SQLiteRepo) jobsColumns() (map[string]bool, error) {
 	return cols, nil
 }
 
-func (r SQLiteRepo) createJobsTable() error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS jobs (
-			run_id TEXT NOT NULL PRIMARY KEY,
-			repo TEXT NOT NULL,
-			name TEXT NOT NULL,
-			branch TEXT NOT NULL,
-			sha TEXT NOT NULL,
-			commit_author TEXT NOT NULL DEFAULT '',
-			start_at TEXT NOT NULL,
-			end_at TEXT,
-			status TEXT NOT NULL,
-			msg TEXT NOT NULL DEFAULT '',
-			log_path TEXT NOT NULL DEFAULT ''
-		);`,
-		`CREATE INDEX IF NOT EXISTS idx_jobs_repo_name_branch_status_start
-		 ON jobs(repo, name, branch, status, start_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_jobs_repo_name_branch_start
-		 ON jobs(repo, name, branch, start_at DESC);`,
-	}
+const jobsColumnsSQL = `(
+	run_id TEXT NOT NULL PRIMARY KEY,
+	repo TEXT NOT NULL,
+	name TEXT NOT NULL,
+	branch TEXT NOT NULL,
+	sha TEXT NOT NULL,
+	commit_author TEXT NOT NULL DEFAULT '',
+	start_at TEXT NOT NULL,
+	end_at TEXT,
+	status TEXT NOT NULL,
+	msg TEXT NOT NULL DEFAULT '',
+	log_path TEXT NOT NULL DEFAULT ''
+)`
 
-	for _, stmt := range stmts {
-		if _, err := r.db.Exec(stmt); err != nil {
-			return fmt.Errorf("ensure schema: %w", err)
-		}
+func (r SQLiteRepo) createJobsTable() error {
+	if _, err := r.db.Exec(`CREATE TABLE IF NOT EXISTS jobs ` + jobsColumnsSQL); err != nil {
+		return fmt.Errorf("ensure schema: %w", err)
 	}
-	return nil
+	return r.createJobsIndexes()
 }
 
 func (r SQLiteRepo) createJobsIndexes() error {
@@ -156,19 +148,7 @@ func (r SQLiteRepo) migrateLegacyJobsTable() error {
 
 	stmts := []string{
 		`DROP TABLE IF EXISTS jobs_new;`,
-		`CREATE TABLE jobs_new (
-			run_id TEXT NOT NULL PRIMARY KEY,
-			repo TEXT NOT NULL,
-			name TEXT NOT NULL,
-			branch TEXT NOT NULL,
-			sha TEXT NOT NULL,
-			commit_author TEXT NOT NULL DEFAULT '',
-			start_at TEXT NOT NULL,
-			end_at TEXT,
-			status TEXT NOT NULL,
-			msg TEXT NOT NULL DEFAULT '',
-			log_path TEXT NOT NULL DEFAULT ''
-		);`,
+		`CREATE TABLE jobs_new ` + jobsColumnsSQL,
 		`INSERT INTO jobs_new (run_id, repo, name, branch, sha, commit_author, start_at, end_at, status, msg, log_path)
 		 SELECT
 		     repo || char(0) || name || char(0) || branch || char(0) || sha || char(0) || start_at,
@@ -188,10 +168,6 @@ func (r SQLiteRepo) migrateLegacyJobsTable() error {
 		 FROM jobs;`,
 		`DROP TABLE jobs;`,
 		`ALTER TABLE jobs_new RENAME TO jobs;`,
-		`CREATE INDEX idx_jobs_repo_name_branch_status_start
-		 ON jobs(repo, name, branch, status, start_at DESC);`,
-		`CREATE INDEX idx_jobs_repo_name_branch_start
-		 ON jobs(repo, name, branch, start_at DESC);`,
 	}
 	for _, stmt := range stmts {
 		if _, err = tx.Exec(stmt); err != nil {
@@ -410,8 +386,12 @@ func scanJob(scanner jobScanner) (Job, error) {
 	return j, nil
 }
 
+// storedTimeLayout is fixed-width so that start_at sorts correctly as text
+// (RFC3339Nano drops trailing zeros, which breaks lexical order).
+const storedTimeLayout = "2006-01-02T15:04:05.000000000Z07:00"
+
 func formatStoredTime(t time.Time) string {
-	return t.UTC().Format(time.RFC3339Nano)
+	return t.UTC().Format(storedTimeLayout)
 }
 
 func parseStoredTime(v string) (time.Time, error) {

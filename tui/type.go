@@ -7,15 +7,8 @@ type StatusEvent struct {
 	IsError bool
 }
 
-type RerunRequest struct {
-	RunID  string
-	Repo   string
-	Name   string
-	Branch string
-	SHA    string
-}
-
-type CancelRequest struct {
+// JobRequest asks a worker to restart or cancel one job run.
+type JobRequest struct {
 	RunID  string
 	Repo   string
 	Name   string

@@ -50,3 +50,18 @@ func TestUpsertRefciSSHHostBlockRejectsUnmanagedHost(t *testing.T) {
 		t.Fatal("expected unmanaged host conflict")
 	}
 }
+
+func TestUnquote(t *testing.T) {
+	for in, want := range map[string]string{
+		`"hello world"`: "hello world",
+		`'two'`:         "two",
+		`"it's"`:        "it's",
+		`'a"`:           `'a"`,
+		`plain`:         "plain",
+		`"`:             `"`,
+	} {
+		if got := unquote(in); got != want {
+			t.Errorf("unquote(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

@@ -9,9 +9,12 @@ import (
 )
 
 func InitRoot(path string) error {
-	root, err := resolveRootPath(path)
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("root path is required")
+	}
+	root, err := ExpandHome(strings.TrimSpace(path))
 	if err != nil {
-		return err
+		return fmt.Errorf("resolve home dir: %w", err)
 	}
 
 	if err := os.MkdirAll(root, 0o755); err != nil {
@@ -26,10 +29,7 @@ func InitRoot(path string) error {
 	}
 
 	dbPath := filepath.Join(root, "refci.db")
-	db, err := OpenDB(DBConfig{
-		Kind:       DBSQLite,
-		SQLitePath: dbPath,
-	})
+	db, err := OpenDB(dbPath)
 	if err != nil {
 		return fmt.Errorf("open sqlite db %q: %w", dbPath, err)
 	}
@@ -43,7 +43,7 @@ func InitRoot(path string) error {
 }
 
 func ListLocalRepos() ([]string, error) {
-	reposDir := LocalPath("repos")
+	reposDir := filepath.Join(Root, "repos")
 	entries, err := os.ReadDir(reposDir)
 	if err != nil {
 		return nil, fmt.Errorf("list repos dir %q: %w", reposDir, err)
@@ -62,24 +62,4 @@ func ListLocalRepos() ([]string, error) {
 	}
 	sort.Strings(repos)
 	return repos, nil
-}
-
-func resolveRootPath(path string) (string, error) {
-	p := strings.TrimSpace(path)
-	if p == "" {
-		return "", fmt.Errorf("root path is required")
-	}
-
-	if p == "~" || strings.HasPrefix(p, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return "", fmt.Errorf("resolve home dir: %w", err)
-		}
-		if p == "~" {
-			return home, nil
-		}
-		return filepath.Join(home, p[2:]), nil
-	}
-
-	return p, nil
 }

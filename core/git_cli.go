@@ -2,12 +2,29 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
+)
+
+var (
+	// FetchTimeout bounds a single background fetch. Stalled connections are
+	// normally detected sooner by the ssh keepalive / http low-speed settings
+	// below; this is the backstop so the poll loop can never hang forever.
+	FetchTimeout = 3 * time.Minute
+)
+
+const (
+	// gitWaitDelay bounds how long we wait for git's output pipes to close
+	// after git exits or is killed. Without it, a surviving child (ssh,
+	// git-remote-https) holding the pipe makes Wait block forever.
+	gitWaitDelay = 5 * time.Second
 )
 
 func CloneMirror(ctx context.Context, repoURL, dstPath string) error {
@@ -41,29 +58,49 @@ func FetchMirror(ctx context.Context, mirrorPath string) error {
 	if path == "" {
 		return fmt.Errorf("mirror path is required")
 	}
-	return runGit(ctx, path, "fetch", "--prune", "origin")
+
+	fetchCtx, cancel := context.WithTimeout(ctx, FetchTimeout)
+	defer cancel()
+
+	args := []string{"fetch", "--prune", "origin"}
+	cmd := newGitCmd(fetchCtx, path, args...)
+	setNonInteractive(cmd)
+	_, err := execGit(cmd, args)
+	if err != nil && errors.Is(fetchCtx.Err(), context.DeadlineExceeded) && ctx.Err() == nil {
+		return fmt.Errorf("git fetch timed out after %s: %w", FetchTimeout, err)
+	}
+	return err
 }
 
-func EnsureWorktree(ctx context.Context, repo, branch, sha string) (string, error) {
-	repoPart := ToLocalRepo(strings.TrimSpace(repo))
-	mirrorPath := filepath.Join(Root, "repos", repoPart)
-	branchPart := toLocalBranch(branch)
-	worktreePath := filepath.Join(Root, "worktrees", repoPart, branchPart)
+// EnsureWorktree checks out sha in a worktree owned by one job on one branch,
+// so jobs sharing a branch never reset each other's checkout.
+func EnsureWorktree(ctx context.Context, repo, name, branch, sha string) (string, error) {
+	mirrorPath := MirrorPath(repo)
+	worktreePath := filepath.Join(Root, "worktrees", ToLocalRepo(strings.TrimSpace(repo)), sanitizePathToken(name), sanitizePathToken(branch))
 	if err := os.MkdirAll(filepath.Dir(worktreePath), 0o755); err != nil {
 		return "", fmt.Errorf("create worktree parent dir: %w", err)
 	}
 
 	shaValue := strings.TrimSpace(sha)
-	if _, err := os.Stat(worktreePath); os.IsNotExist(err) {
-		if err := runGit(ctx, mirrorPath, "worktree", "add", "--detach", worktreePath, shaValue); err != nil {
-			return "", err
+	// Only reset a directory that is really a worktree: without its .git
+	// file, git would walk up and act on whatever repo encloses the root.
+	if _, err := os.Stat(filepath.Join(worktreePath, ".git")); err == nil {
+		if err := runGit(ctx, worktreePath, "reset", "--hard", shaValue); err == nil {
+			return worktreePath, nil
 		}
-		return worktreePath, nil
-	} else if err != nil {
-		return "", fmt.Errorf("stat worktree path: %w", err)
+	}
+	if ctx.Err() != nil {
+		return "", ctx.Err()
 	}
 
-	if err := runGit(ctx, worktreePath, "reset", "--hard", shaValue); err != nil {
+	// Missing or damaged (interrupted add, re-cloned mirror, ...): recreate it.
+	if err := os.RemoveAll(worktreePath); err != nil {
+		return "", fmt.Errorf("remove worktree %q: %w", worktreePath, err)
+	}
+	if err := runGit(ctx, mirrorPath, "worktree", "prune"); err != nil {
+		return "", err
+	}
+	if err := runGit(ctx, mirrorPath, "worktree", "add", "--detach", worktreePath, shaValue); err != nil {
 		return "", err
 	}
 	return worktreePath, nil
@@ -115,12 +152,7 @@ func ListBranchHeadsByPattern(ctx context.Context, repo, branchPattern string) (
 	}
 
 	pattern := normalizeBranchPattern(branchPattern)
-	if strings.Contains(pattern, "*") && !strings.HasSuffix(pattern, "*") {
-		return nil, fmt.Errorf("only trailing wildcard is supported: %q", branchPattern)
-	}
-
-	mirrorPath := filepath.Join(Root, "repos", ToLocalRepo(repoName))
-	heads, err := ListBranchHeads(ctx, mirrorPath)
+	heads, err := ListBranchHeads(ctx, MirrorPath(repoName))
 	if err != nil {
 		return nil, err
 	}
@@ -171,14 +203,16 @@ func LoadJobConfsFromRepo(ctx context.Context, repo, ref string) ([]JobConf, err
 		rev = "HEAD"
 	}
 
-	mirrorPath := filepath.Join(Root, "repos", ToLocalRepo(repoName))
 	// get the latest config with git show
-	content, err := runGitOutput(ctx, mirrorPath, "show", rev+":.refci/conf.yml")
+	content, err := runGitOutput(ctx, MirrorPath(repoName), "show", rev+":.refci/conf.yml")
 	if err != nil {
 		return nil, err
 	}
 
-	confs := ParseJobConfs(content)
+	confs, err := ParseJobConfs(content)
+	if err != nil {
+		return nil, err
+	}
 	for i := range confs {
 		confs[i].Repo = repoName
 	}
@@ -195,8 +229,7 @@ func CommitAuthorAtSHA(ctx context.Context, repo, sha string) (string, error) {
 		return "", fmt.Errorf("sha is required")
 	}
 
-	mirrorPath := filepath.Join(Root, "repos", ToLocalRepo(repoName))
-	out, err := runGitOutput(ctx, mirrorPath, "show", "-s", "--format=%an", shaValue)
+	out, err := runGitOutput(ctx, MirrorPath(repoName), "show", "-s", "--format=%an", shaValue)
 	if err != nil {
 		return "", err
 	}
@@ -211,20 +244,16 @@ func ListChangedFiles(ctx context.Context, repo, oldSHA, newSHA string) ([]strin
 		return nil, nil
 	}
 
-	mirrorPath := filepath.Join(Root, "repos", ToLocalRepo(repo))
-	out, err := runGitOutput(ctx, mirrorPath, "diff", "--name-only", oldSHA, newSHA)
+	out, err := runGitOutput(ctx, MirrorPath(repo), "diff", "--name-only", oldSHA, newSHA)
 	if err != nil {
 		return nil, err
 	}
 
-	lines := strings.Split(out, "\n")
-	files := make([]string, 0, len(lines))
-	for _, line := range lines {
-		file := line
-		if file == "" {
-			continue
+	var files []string
+	for _, file := range strings.Split(out, "\n") {
+		if file != "" {
+			files = append(files, file)
 		}
-		files = append(files, file)
 	}
 	return files, nil
 }
@@ -317,31 +346,46 @@ func matchPathParts(patternParts, targetParts []string) bool {
 	return matchPathParts(patternParts[1:], targetParts[1:])
 }
 
-func toLocalBranch(branch string) string {
-	s := branch
-	s = strings.TrimPrefix(s, "refs/heads/")
-	s = strings.TrimPrefix(s, "refs/")
-	s = strings.ReplaceAll(s, "/", "--")
-	s = strings.ReplaceAll(s, "\\", "--")
-	s = strings.ReplaceAll(s, ":", "_")
-	s = strings.ReplaceAll(s, " ", "_")
-	if s == "" {
-		return "default"
-	}
-	return s
-}
-
 func runGit(ctx context.Context, dir string, args ...string) error {
 	_, err := runGitOutput(ctx, dir, args...)
 	return err
 }
 
 func runGitOutput(ctx context.Context, dir string, args ...string) (string, error) {
+	return execGit(newGitCmd(ctx, dir, args...), args)
+}
+
+func newGitCmd(ctx context.Context, dir string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	if strings.TrimSpace(dir) != "" {
 		cmd.Dir = dir
 	}
+	cmd.WaitDelay = gitWaitDelay
+	return cmd
+}
 
+// setNonInteractive prepares a network git command for unattended use: it
+// fails instead of prompting (a prompt on /dev/tty would block forever behind
+// the TUI), drops dead connections, and kills the whole process group
+// (git + ssh/remote helper) on cancel or timeout.
+func setNonInteractive(cmd *exec.Cmd) {
+	env := append(os.Environ(),
+		"GIT_TERMINAL_PROMPT=0",
+		// abort https transfers slower than 1KB/s for 60s
+		"GIT_HTTP_LOW_SPEED_LIMIT=1000",
+		"GIT_HTTP_LOW_SPEED_TIME=60",
+	)
+	if os.Getenv("GIT_SSH_COMMAND") == "" && os.Getenv("GIT_SSH") == "" {
+		env = append(env, "GIT_SSH_COMMAND=ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=3")
+	}
+	cmd.Env = env
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return signalProcess(cmd.Process.Pid, syscall.SIGKILL)
+	}
+}
+
+func execGit(cmd *exec.Cmd, args []string) (string, error) {
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("git %s failed: %w\n%s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))

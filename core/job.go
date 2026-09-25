@@ -39,8 +39,10 @@ type JobRunner struct {
 	running map[string]*runningJob
 }
 
+// ErrJobNotRunning is returned by Cancel when this runner has no process for the job.
+var ErrJobNotRunning = errors.New("job is not running")
+
 type runningJob struct {
-	cancel   context.CancelFunc
 	cmd      *exec.Cmd
 	done     chan struct{}
 	canceled atomic.Bool
@@ -71,7 +73,6 @@ func (j *JobRunner) QueueJob(jobConf JobConf, envs []string, branch, sha string)
 		return err
 	}
 	if latestJob.SHA == sha {
-		j.logEvent("queue skip job=%s branch=%s sha=%s unchanged", name, branch, shortSHA(sha))
 		return nil
 	}
 
@@ -81,10 +82,11 @@ func (j *JobRunner) QueueJob(jobConf JobConf, envs []string, branch, sha string)
 			latestJob.Name,
 			latestJob.Branch,
 			shortRunID(latestJob.RunID),
-			shortSHA(latestJob.SHA),
-			strings.ToLower(strings.TrimSpace(latestJob.Status)),
+			ShortSHA(latestJob.SHA),
+			latestJob.Status,
 		)
-		if err = j.Cancel(latestJob); err != nil {
+		// the previous run may have finished in the meantime; that is fine
+		if err = j.Cancel(latestJob); err != nil && !errors.Is(err, ErrJobNotRunning) {
 			return err
 		}
 	}
@@ -102,31 +104,32 @@ func (j *JobRunner) RerunJob(jobConf JobConf, envs []string, branch, sha string)
 		return fmt.Errorf("job sha is required")
 	}
 
-	j.logEvent("rerun queued job=%s branch=%s sha=%s", name, branch, shortSHA(sha))
+	j.logEvent("rerun queued job=%s branch=%s sha=%s", name, branch, ShortSHA(sha))
 	return j.runJobAtSHA(jobConf, envs, branch, sha)
 }
 
 func (j *JobRunner) runJobAtSHA(jobConf JobConf, envs []string, branch, sha string) error {
 	name := jobConf.Name
-	j.logEvent("prepare job=%s branch=%s sha=%s worktree", name, branch, shortSHA(sha))
-	workDir, err := EnsureWorktree(context.Background(), jobConf.Repo, branch, sha)
+	runID := newRunID()
+	commitAuthor, _ := CommitAuthorAtSHA(context.Background(), jobConf.Repo, sha)
+
+	workDir, err := EnsureWorktree(context.Background(), jobConf.Repo, name, branch, sha)
+	scriptPath := filepath.Join(workDir, jobConf.ScriptPath)
+	if err == nil {
+		if info, statErr := os.Stat(scriptPath); statErr != nil || info.IsDir() {
+			err = fmt.Errorf("script not found: %s", jobConf.ScriptPath)
+		}
+	}
 	if err != nil {
-		j.logEvent("prepare failed job=%s branch=%s sha=%s: %v", name, branch, shortSHA(sha), err)
+		j.logEvent("prepare failed job=%s branch=%s sha=%s: %v", name, branch, ShortSHA(sha), err)
+		// Record the failure so it shows in the TUI and is not retried on every poll.
+		if dbErr := j.dbRepo.CreateJob(runID, jobConf.Repo, name, branch, sha, commitAuthor); dbErr == nil {
+			_ = j.dbRepo.UpdateJob(runID, StatusFailed, err.Error(), "")
+		}
 		return err
 	}
-	scriptPath := filepath.Join(workDir, jobConf.ScriptPath)
-	if _, err := os.Stat(scriptPath); err != nil {
-		j.logEvent("prepare failed job=%s branch=%s sha=%s missing_script=%s", name, branch, shortSHA(sha), scriptPath)
-		return fmt.Errorf("script not found: %s", scriptPath)
-	}
 
-	commitAuthor, err := CommitAuthorAtSHA(context.Background(), jobConf.Repo, sha)
-	if err != nil {
-		commitAuthor = ""
-	}
-
-	runID := newRunID()
-	if _, err = j.Start(context.Background(), RunJobRequest{
+	if _, err = j.Start(RunJobRequest{
 		RunID:        runID,
 		Repo:         jobConf.Repo,
 		Name:         name,
@@ -137,24 +140,18 @@ func (j *JobRunner) runJobAtSHA(jobConf JobConf, envs []string, branch, sha stri
 		WorkDir:      workDir,
 		Env:          envs,
 	}); err != nil {
-		j.logEvent("start failed job=%s branch=%s sha=%s: %v", name, branch, shortSHA(sha), err)
+		j.logEvent("start failed job=%s branch=%s sha=%s: %v", name, branch, ShortSHA(sha), err)
 		return err
 	}
 
 	return nil
 }
 
-func (r *JobRunner) Start(ctx context.Context, req RunJobRequest) (string, error) {
+func (r *JobRunner) Start(req RunJobRequest) (string, error) {
 	key := strings.TrimSpace(req.RunID)
 	if key == "" {
 		return "", fmt.Errorf("job run id is required")
 	}
-	r.mu.Lock()
-	if _, exists := r.running[key]; exists {
-		r.mu.Unlock()
-		return "", fmt.Errorf("job is already running: %s", key)
-	}
-	r.mu.Unlock()
 
 	if err := r.dbRepo.CreateJob(req.RunID, req.Repo, req.Name, req.Branch, req.SHA, req.CommitAuthor); err != nil {
 		return "", fmt.Errorf("create job row: %w", err)
@@ -166,8 +163,9 @@ func (r *JobRunner) Start(ctx context.Context, req RunJobRequest) (string, error
 		return "", err
 	}
 
-	runCtx, cancel := context.WithCancel(ctx)
-	cmd := exec.CommandContext(runCtx, "bash", req.ScriptPath)
+	// Not CommandContext: its cancel SIGKILLs bash at once, skipping the
+	// SIGTERM grace period that lets scripts run their traps.
+	cmd := exec.Command("bash", req.ScriptPath)
 	cmd.Dir = strings.TrimSpace(req.WorkDir)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
@@ -176,19 +174,16 @@ func (r *JobRunner) Start(ctx context.Context, req RunJobRequest) (string, error
 
 	if err := r.dbRepo.UpdateJob(req.RunID, StatusRunning, "", logPath); err != nil {
 		_ = logFile.Close()
-		cancel()
 		return "", fmt.Errorf("set job running: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
 		_ = logFile.Close()
 		_ = r.dbRepo.UpdateJob(req.RunID, StatusFailed, err.Error(), "")
-		cancel()
 		return "", fmt.Errorf("start job process: %w", err)
 	}
 
 	rj := &runningJob{
-		cancel:  cancel,
 		cmd:     cmd,
 		done:    make(chan struct{}),
 		started: time.Now(),
@@ -198,7 +193,7 @@ func (r *JobRunner) Start(ctx context.Context, req RunJobRequest) (string, error
 	r.running[key] = rj
 	r.mu.Unlock()
 
-	r.logEvent("job started name=%s branch=%s run=%s sha=%s pid=%d log=%s", req.Name, req.Branch, shortRunID(req.RunID), shortSHA(req.SHA), cmd.Process.Pid, logPath)
+	r.logEvent("job started name=%s branch=%s run=%s sha=%s pid=%d log=%s", req.Name, req.Branch, shortRunID(req.RunID), ShortSHA(req.SHA), cmd.Process.Pid, logPath)
 	go r.waitJob(req, key, rj, logFile)
 
 	return logPath, nil
@@ -214,16 +209,13 @@ func (r *JobRunner) Cancel(job Job) error {
 	rj, ok := r.running[key]
 	r.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("job is not running: %s %s %s %s", job.Repo, job.Name, job.Branch, job.SHA)
+		return fmt.Errorf("%w: %s %s %s %s", ErrJobNotRunning, job.Repo, job.Name, job.Branch, job.SHA)
 	}
 
-	r.logEvent("cancel requested job=%s branch=%s run=%s sha=%s", job.Name, job.Branch, shortRunID(job.RunID), shortSHA(job.SHA))
+	r.logEvent("cancel requested job=%s branch=%s run=%s sha=%s", job.Name, job.Branch, shortRunID(job.RunID), ShortSHA(job.SHA))
 	rj.canceled.Store(true)
-	rj.cancel()
-
-	if rj.cmd.Process != nil {
-		_ = signalProcess(rj.cmd.Process.Pid, syscall.SIGTERM)
-	}
+	pid := rj.cmd.Process.Pid
+	_ = signalProcess(pid, syscall.SIGTERM)
 
 	select {
 	case <-rj.done:
@@ -231,20 +223,9 @@ func (r *JobRunner) Cancel(job Job) error {
 	case <-time.After(r.cancelGrace):
 	}
 
-	if rj.cmd.Process != nil {
-		_ = signalProcess(rj.cmd.Process.Pid, syscall.SIGKILL)
-		r.logEvent("cancel escalated to kill job=%s branch=%s run=%s sha=%s", job.Name, job.Branch, shortRunID(job.RunID), shortSHA(job.SHA))
-	}
-
+	_ = signalProcess(pid, syscall.SIGKILL)
+	r.logEvent("cancel escalated to kill job=%s branch=%s run=%s sha=%s", job.Name, job.Branch, shortRunID(job.RunID), ShortSHA(job.SHA))
 	return nil
-}
-
-func (r *JobRunner) IsRunning(runID string) bool {
-	key := strings.TrimSpace(runID)
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	_, ok := r.running[key]
-	return ok
 }
 
 // Stop cancels this runner's jobs and waits for their processes and DB updates.
@@ -265,10 +246,7 @@ func (r *JobRunner) Stop() {
 }
 
 func (r *JobRunner) waitJob(req RunJobRequest, key string, rj *runningJob, logFile *os.File) {
-	pid := 0
-	if rj.cmd.Process != nil {
-		pid = rj.cmd.Process.Pid
-	}
+	pid := rj.cmd.Process.Pid
 	err := rj.cmd.Wait()
 	r.cleanupProcessGroup(req, pid)
 	_ = logFile.Close()
@@ -280,7 +258,7 @@ func (r *JobRunner) waitJob(req RunJobRequest, key string, rj *runningJob, logFi
 		req.Name,
 		req.Branch,
 		shortRunID(req.RunID),
-		shortSHA(req.SHA),
+		ShortSHA(req.SHA),
 		status,
 		time.Since(rj.started).Round(time.Millisecond),
 		trimLogMessage(msg),
@@ -297,20 +275,20 @@ func (r *JobRunner) cleanupProcessGroup(req RunJobRequest, pid int) {
 		return
 	}
 
-	r.logEvent("job cleanup started name=%s branch=%s run=%s sha=%s pid=%d", req.Name, req.Branch, shortRunID(req.RunID), shortSHA(req.SHA), pid)
+	r.logEvent("job cleanup started name=%s branch=%s run=%s sha=%s pid=%d", req.Name, req.Branch, shortRunID(req.RunID), ShortSHA(req.SHA), pid)
 	_ = signalProcessGroup(pid, syscall.SIGTERM)
 	if waitForProcessGroupExit(pid, r.exitCleanupGrace) {
-		r.logEvent("job cleanup finished name=%s branch=%s run=%s sha=%s mode=term", req.Name, req.Branch, shortRunID(req.RunID), shortSHA(req.SHA))
+		r.logEvent("job cleanup finished name=%s branch=%s run=%s sha=%s mode=term", req.Name, req.Branch, shortRunID(req.RunID), ShortSHA(req.SHA))
 		return
 	}
 
 	_ = signalProcessGroup(pid, syscall.SIGKILL)
 	if waitForProcessGroupExit(pid, 100*time.Millisecond) {
-		r.logEvent("job cleanup finished name=%s branch=%s run=%s sha=%s mode=kill", req.Name, req.Branch, shortRunID(req.RunID), shortSHA(req.SHA))
+		r.logEvent("job cleanup finished name=%s branch=%s run=%s sha=%s mode=kill", req.Name, req.Branch, shortRunID(req.RunID), ShortSHA(req.SHA))
 		return
 	}
 
-	r.logEvent("job cleanup incomplete name=%s branch=%s run=%s sha=%s pid=%d", req.Name, req.Branch, shortRunID(req.RunID), shortSHA(req.SHA), pid)
+	r.logEvent("job cleanup incomplete name=%s branch=%s run=%s sha=%s pid=%d", req.Name, req.Branch, shortRunID(req.RunID), ShortSHA(req.SHA), pid)
 }
 
 func (r *JobRunner) logEvent(format string, args ...any) {
@@ -345,7 +323,7 @@ func createJobLogFile(req RunJobRequest) (string, *os.File, error) {
 	repoPart := ToLocalRepo(req.Repo)
 	refPart := sanitizePathToken(req.Name)
 	branchPart := sanitizePathToken(req.Branch)
-	shaPart := sanitizePathToken(shortSHA(req.SHA))
+	shaPart := sanitizePathToken(ShortSHA(req.SHA))
 	runPart := sanitizePathToken(shortRunID(req.RunID))
 
 	dir := filepath.Join(Root, "logs", repoPart)
@@ -370,8 +348,6 @@ func signalProcess(pid int, sig syscall.Signal) error {
 	// Try process group first to terminate spawned children too.
 	if err := signalProcessGroup(pid, sig); err == nil {
 		return nil
-	} else if !errors.Is(err, syscall.ESRCH) {
-		// Fall back to direct process signal below.
 	}
 
 	err := syscall.Kill(pid, sig)
@@ -428,21 +404,4 @@ func shortRunID(runID string) string {
 		return s
 	}
 	return s[:8]
-}
-
-func shortSHA(sha string) string {
-	s := strings.TrimSpace(sha)
-	if len(s) <= 12 {
-		return s
-	}
-	return s[:12]
-}
-
-func sanitizePathToken(s string) string {
-	out := strings.TrimSpace(s)
-	out = strings.ReplaceAll(out, "/", "--")
-	out = strings.ReplaceAll(out, "\\", "--")
-	out = strings.ReplaceAll(out, ":", "_")
-	out = strings.ReplaceAll(out, " ", "_")
-	return out
 }

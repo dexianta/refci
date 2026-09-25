@@ -2,21 +2,6 @@ package core
 
 import "time"
 
-type CodeRepo struct {
-	Repo string
-	URL  string // should we distinguish ssh or https
-}
-
-type RepoSetting struct {
-	Repo  string
-	Key   string
-	Value string
-}
-
-type GlobalSetting struct {
-	LogRetentionDays int
-}
-
 type Job struct {
 	RunID        string
 	Repo         string
@@ -31,7 +16,7 @@ type Job struct {
 	Msg          string
 }
 
-var (
+const (
 	StatusRunning  = "running"
 	StatusPending  = "pending"
 	StatusCanceled = "canceled"

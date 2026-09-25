@@ -25,8 +25,8 @@ type topModel struct {
 
 	statusCh  <-chan StatusEvent
 	dbRepo    core.DbRepo
-	rerunCh   chan<- RerunRequest
-	cancelCh  chan<- CancelRequest
+	rerunCh   chan<- JobRequest
+	cancelCh  chan<- JobRequest
 	logsModel logsModel
 }
 
@@ -41,7 +41,7 @@ const allReposLabel = "All repositories"
 
 type tickMsg time.Time
 
-func newModel(repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) topModel {
+func newModel(repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- JobRequest, cancelCh chan<- JobRequest) topModel {
 	return topModel{
 		now:       time.Now(),
 		repo:      repo,
@@ -54,23 +54,22 @@ func newModel(repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, reru
 	}
 }
 
-func newRepoPickerModel(dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) topModel {
+func newRepoPickerModel(dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- JobRequest, cancelCh chan<- JobRequest) topModel {
 	m := newModel("", dbRepo, statusCh, rerunCh, cancelCh)
 	m.pickerEnabled = true
 	return m
 }
 
-func Run(ctx context.Context, repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) error {
-	p := tea.NewProgram(newModel(repo, dbRepo, statusCh, rerunCh, cancelCh), tea.WithAltScreen(), tea.WithContext(ctx), tea.WithoutSignalHandler())
-	_, err := p.Run()
-	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
-		return nil
-	}
-	return err
+func Run(ctx context.Context, repo string, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- JobRequest, cancelCh chan<- JobRequest) error {
+	return runProgram(ctx, newModel(repo, dbRepo, statusCh, rerunCh, cancelCh))
 }
 
-func RunRepoPicker(ctx context.Context, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) error {
-	p := tea.NewProgram(newRepoPickerModel(dbRepo, statusCh, rerunCh, cancelCh), tea.WithAltScreen(), tea.WithContext(ctx), tea.WithoutSignalHandler())
+func RunRepoPicker(ctx context.Context, dbRepo core.DbRepo, statusCh <-chan StatusEvent, rerunCh chan<- JobRequest, cancelCh chan<- JobRequest) error {
+	return runProgram(ctx, newRepoPickerModel(dbRepo, statusCh, rerunCh, cancelCh))
+}
+
+func runProgram(ctx context.Context, m topModel) error {
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithContext(ctx), tea.WithoutSignalHandler())
 	_, err := p.Run()
 	if errors.Is(err, tea.ErrProgramKilled) && ctx.Err() != nil {
 		return nil

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -98,8 +99,8 @@ func loadWorkerConfigs(path string) ([]runtimeConfig, error) {
 }
 
 type repoWorker struct {
-	rerunCh  chan tui.RerunRequest
-	cancelCh chan tui.CancelRequest
+	rerunCh  chan tui.JobRequest
+	cancelCh chan tui.JobRequest
 	done     chan struct{}
 }
 
@@ -115,7 +116,7 @@ func reportWorkerStatus(ctx context.Context, statusCh chan<- tui.StatusEvent, re
 	}
 }
 
-func routeWorkerRequests(ctx context.Context, workers map[string]*repoWorker, statusCh chan<- tui.StatusEvent, rerunCh <-chan tui.RerunRequest, cancelCh <-chan tui.CancelRequest) {
+func routeWorkerRequests(ctx context.Context, workers map[string]*repoWorker, statusCh chan<- tui.StatusEvent, rerunCh <-chan tui.JobRequest, cancelCh <-chan tui.JobRequest) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -146,6 +147,27 @@ func routeWorkerRequests(ctx context.Context, workers map[string]*repoWorker, st
 	}
 }
 
+// lockRepoWorker takes an exclusive lock on logs/<repo>/worker.lock; it is
+// released when the returned file is closed or the process exits.
+func lockRepoWorker(repo string) (*os.File, error) {
+	dir := filepath.Dir(core.CIActivityLogPath(repo))
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("create worker lock dir: %w", err)
+	}
+	f, err := os.OpenFile(filepath.Join(dir, "worker.lock"), os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("open worker lock: %w", err)
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			return nil, fmt.Errorf("another refci worker is already polling %s; stop it first", repo)
+		}
+		return nil, fmt.Errorf("lock worker: %w", err)
+	}
+	return f, nil
+}
+
 func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig, interval time.Duration, monitorMode bool, statusCh chan<- tui.StatusEvent) (*repoWorker, error) {
 	ciLogger, err := core.NewCIActivityLogger(cfg.Repo)
 	if err != nil {
@@ -153,8 +175,8 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 	}
 	runner := core.NewJobRunner(dbRepo)
 	runner.SetLogger(ciLogger.Logf)
-	rerunCh := make(chan tui.RerunRequest, 8)
-	cancelCh := make(chan tui.CancelRequest, 8)
+	rerunCh := make(chan tui.JobRequest, 8)
+	cancelCh := make(chan tui.JobRequest, 8)
 	done := make(chan struct{})
 	reportStatus := func(msg string, isErr bool) bool {
 		if msg == "" {
@@ -163,9 +185,16 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 		return reportWorkerStatus(ctx, statusCh, cfg.Repo, msg, isErr)
 	}
 
+	var lock *os.File
 	if !monitorMode {
+		// Held for the worker's lifetime: a second poller for the same repo
+		// would mark this one's running jobs as stale and race it on queuing.
+		if lock, err = lockRepoWorker(cfg.Repo); err != nil {
+			return nil, err
+		}
 		staleCount, err := markRepoJobsCanceled(dbRepo, cfg.Repo, "worker restarted before job completion", ciLogger.Logf)
 		if err != nil {
+			_ = lock.Close()
 			return nil, err
 		}
 		if staleCount > 0 {
@@ -181,6 +210,9 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 
 	go func() {
 		defer close(done)
+		if lock != nil {
+			defer lock.Close()
+		}
 
 		doPoll := func() {}
 		var ticker *time.Ticker
@@ -194,30 +226,18 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 				}
 				var loopErr error
 				started := time.Now()
-				ciLogger.Logf("poll tick start")
 
-				fetchStarted := time.Now()
-				ciLogger.Logf("fetch mirror start path=%s", cfg.MirrorPath)
+				// Only failures and queue decisions are logged; quiet ticks would
+				// otherwise add several lines to ci.log every interval.
 				if err := fetchMirror(ctx, cfg.MirrorPath); err != nil {
-					ciLogger.Logf("fetch mirror failed after %s: %v", time.Since(fetchStarted).Round(time.Millisecond), err)
+					ciLogger.Logf("fetch mirror failed after %s: %v", time.Since(started).Round(time.Millisecond), err)
 					loopErr = fmt.Errorf("fetch mirror: %w", err)
-				} else {
-					ciLogger.Logf("fetch mirror done in %s", time.Since(fetchStarted).Round(time.Millisecond))
-					loadStarted := time.Now()
-					ciLogger.Logf("load job config start ref=HEAD")
-					jobs, err := core.LoadJobConfsFromRepo(ctx, cfg.Repo, "HEAD")
-					if err != nil {
-						ciLogger.Logf("load job config failed after %s: %v", time.Since(loadStarted).Round(time.Millisecond), err)
-						loopErr = fmt.Errorf("load .refci/conf.yml: %w", err)
-					} else if len(jobs) == 0 {
-						ciLogger.Logf("load job config done in %s count=0", time.Since(loadStarted).Round(time.Millisecond))
-						loopErr = fmt.Errorf("no jobs found in .refci/conf.yml for %s", cfg.Repo)
-					} else {
-						ciLogger.Logf("load job config done in %s count=%d", time.Since(loadStarted).Round(time.Millisecond), len(jobs))
-						if err := pollOnce(ctx, dbRepo, runner, cfg, jobs, ciLogger.Logf); err != nil {
-							loopErr = fmt.Errorf("poll failed: %w", err)
-						}
-					}
+				} else if jobs, err := core.LoadJobConfsFromRepo(ctx, cfg.Repo, "HEAD"); err != nil {
+					loopErr = fmt.Errorf("load .refci/conf.yml: %w", err)
+				} else if len(jobs) == 0 {
+					loopErr = fmt.Errorf("no jobs found in .refci/conf.yml for %s", cfg.Repo)
+				} else if err := pollOnce(ctx, dbRepo, runner, cfg, jobs, ciLogger.Logf); err != nil {
+					loopErr = fmt.Errorf("poll failed: %w", err)
 				}
 
 				if loopErr != nil {
@@ -232,8 +252,6 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 					if reportStatus("", false) {
 						lastErr = ""
 					}
-				} else {
-					ciLogger.Logf("poll tick done in %s", time.Since(started).Round(time.Millisecond))
 				}
 			}
 
@@ -257,23 +275,23 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 				ciLogger.Logf("worker stop")
 				return
 			case req := <-rerunCh:
-				ciLogger.Logf("rerun requested job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
+				ciLogger.Logf("rerun requested job=%s branch=%s sha=%s", req.Name, req.Branch, core.ShortSHA(req.SHA))
 				if err := rerunJob(ctx, dbRepo, runner, cfg, req); err != nil {
-					ciLogger.Logf("rerun failed job=%s branch=%s sha=%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err)
+					ciLogger.Logf("rerun failed job=%s branch=%s sha=%s: %v", req.Name, req.Branch, core.ShortSHA(req.SHA), err)
 					reportStatus(fmt.Sprintf("restart failed for %s/%s: %v", req.Name, req.Branch, err), true)
 					continue
 				}
-				ciLogger.Logf("rerun started job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
+				ciLogger.Logf("rerun started job=%s branch=%s sha=%s", req.Name, req.Branch, core.ShortSHA(req.SHA))
 				reportStatus(fmt.Sprintf("restart started for %s/%s", req.Name, req.Branch), false)
 			case req := <-cancelCh:
-				ciLogger.Logf("cancel requested job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
+				ciLogger.Logf("cancel requested job=%s branch=%s sha=%s", req.Name, req.Branch, core.ShortSHA(req.SHA))
 				if err := cancelJob(ctx, dbRepo, runner, req); err != nil {
-					ciLogger.Logf("cancel failed job=%s branch=%s sha=%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err)
-					reportStatus(fmt.Sprintf("cancel failed for %s/%s@%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err), true)
+					ciLogger.Logf("cancel failed job=%s branch=%s sha=%s: %v", req.Name, req.Branch, core.ShortSHA(req.SHA), err)
+					reportStatus(fmt.Sprintf("cancel failed for %s/%s@%s: %v", req.Name, req.Branch, core.ShortSHA(req.SHA), err), true)
 					continue
 				}
-				ciLogger.Logf("cancel accepted job=%s branch=%s sha=%s", req.Name, req.Branch, shortSHA(req.SHA))
-				reportStatus(fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)), false)
+				ciLogger.Logf("cancel accepted job=%s branch=%s sha=%s", req.Name, req.Branch, core.ShortSHA(req.SHA))
+				reportStatus(fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, core.ShortSHA(req.SHA)), false)
 			case <-tickerCh:
 				doPoll()
 			}

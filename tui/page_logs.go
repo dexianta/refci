@@ -1,11 +1,12 @@
 package tui
 
 import (
+	"bytes"
 	"dexianta/refci/core"
 	"fmt"
+	"io"
 	"math"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -29,8 +30,8 @@ const (
 type logsModel struct {
 	dbRepo   core.DbRepo
 	repo     string
-	rerunCh  chan<- RerunRequest
-	cancelCh chan<- CancelRequest
+	rerunCh  chan<- JobRequest
+	cancelCh chan<- JobRequest
 
 	jobs     []core.Job
 	selected int
@@ -46,7 +47,7 @@ type logsModel struct {
 	jobsLoadErr bool
 }
 
-func newLogsModel(dbRepo core.DbRepo, repo string, rerunCh chan<- RerunRequest, cancelCh chan<- CancelRequest) logsModel {
+func newLogsModel(dbRepo core.DbRepo, repo string, rerunCh chan<- JobRequest, cancelCh chan<- JobRequest) logsModel {
 	return logsModel{
 		dbRepo:   dbRepo,
 		repo:     repo,
@@ -94,7 +95,7 @@ func loadJobLogCmd(path string) tea.Cmd {
 	}
 }
 
-func requestRerunCmd(ch chan<- RerunRequest, req RerunRequest) tea.Cmd {
+func requestRerunCmd(ch chan<- JobRequest, req JobRequest) tea.Cmd {
 	if ch == nil {
 		return nil
 	}
@@ -102,7 +103,7 @@ func requestRerunCmd(ch chan<- RerunRequest, req RerunRequest) tea.Cmd {
 		select {
 		case ch <- req:
 			return statusEventMsg{
-				message: fmt.Sprintf("restart queued for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)),
+				message: fmt.Sprintf("restart queued for %s/%s@%s", req.Name, req.Branch, core.ShortSHA(req.SHA)),
 				inErr:   false,
 			}
 		default:
@@ -114,7 +115,7 @@ func requestRerunCmd(ch chan<- RerunRequest, req RerunRequest) tea.Cmd {
 	}
 }
 
-func requestCancelCmd(ch chan<- CancelRequest, req CancelRequest) tea.Cmd {
+func requestCancelCmd(ch chan<- JobRequest, req JobRequest) tea.Cmd {
 	if ch == nil {
 		return nil
 	}
@@ -122,7 +123,7 @@ func requestCancelCmd(ch chan<- CancelRequest, req CancelRequest) tea.Cmd {
 		select {
 		case ch <- req:
 			return statusEventMsg{
-				message: fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)),
+				message: fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, core.ShortSHA(req.SHA)),
 				inErr:   false,
 			}
 		default:
@@ -217,7 +218,7 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			m.mode = logsModeDetail
-			m.logPath = pathForJob(m.jobs[m.selected])
+			m.logPath = m.jobs[m.selected].LogPath
 			m.logRows = nil
 			return m, loadJobLogCmd(m.logPath), true
 		case "l", "L":
@@ -237,13 +238,12 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			job := m.jobs[m.selected]
-			status := strings.ToLower(strings.TrimSpace(job.Status))
-			if status != core.StatusFailed && status != core.StatusCanceled {
+			if job.Status != core.StatusFailed && job.Status != core.StatusCanceled {
 				m.statusInErr = true
 				m.statusMsg = "select a failed/canceled job to restart"
 				return m, nil, true
 			}
-			return m, requestRerunCmd(m.rerunCh, RerunRequest{
+			return m, requestRerunCmd(m.rerunCh, JobRequest{
 				RunID:  job.RunID,
 				Repo:   job.Repo,
 				Name:   job.Name,
@@ -255,13 +255,12 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			job := m.jobs[m.selected]
-			status := strings.ToLower(job.Status)
-			if status != core.StatusRunning && status != core.StatusPending {
+			if job.Status != core.StatusRunning && job.Status != core.StatusPending {
 				m.statusInErr = true
 				m.statusMsg = "select a running/pending job to cancel"
 				return m, nil, true
 			}
-			return m, requestCancelCmd(m.cancelCh, CancelRequest{
+			return m, requestCancelCmd(m.cancelCh, JobRequest{
 				RunID:  job.RunID,
 				Repo:   job.Repo,
 				Name:   job.Name,
@@ -326,7 +325,7 @@ func (m logsModel) renderJobList() string {
 		}
 		nameCell := fixedCell(j.Name, actionNameColWidth)
 		branchCell := fixedCell(j.Branch, branchColWidth)
-		shaCell := fixedCell(shortSHA(j.SHA), shaColWidth)
+		shaCell := fixedCell(core.ShortSHA(j.SHA), shaColWidth)
 		authorCell := fixedCell(displayCommitAuthor(j.CommitAuthor), authorColWidth)
 		statusCell := fixedCell(statusTag(j.Status), statusColWidth)
 		elapsedCell := fixedCell(elapsedForJob(now, j), elapsedColWidth)
@@ -525,22 +524,6 @@ func (m logsModel) renderLogDetail() string {
 	return regionFocusedStyle.Render(content)
 }
 
-func shortSHA(sha string) string {
-	s := strings.TrimSpace(sha)
-	if len(s) <= 8 {
-		return s
-	}
-	return s[:8]
-}
-
-func shortLogSHA(sha string) string {
-	s := strings.TrimSpace(sha)
-	if len(s) <= 12 {
-		return s
-	}
-	return s[:12]
-}
-
 func statusTag(v string) string {
 	switch strings.ToLower(v) {
 	case core.StatusFinished:
@@ -631,45 +614,40 @@ func compactDuration(d time.Duration) string {
 	}
 }
 
-func readTail(path string, max int) ([]string, error) {
+// tailBytes bounds how much of a log file is read on each refresh.
+const tailBytes = 256 << 10
+
+func readTail(path string, maxRows int) ([]string, error) {
 	if path == "" {
 		return nil, nil
 	}
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
 	}
+	defer f.Close()
 
-	rows := strings.Split(string(b), "\n")
-	if len(rows) > max {
-		rows = rows[len(rows)-max:]
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
 	}
-	return rows, nil
-}
-
-func pathForJob(job core.Job) string {
-	if logPath := strings.TrimSpace(job.LogPath); logPath != "" {
-		return logPath
+	offset := max(0, info.Size()-tailBytes)
+	b, err := io.ReadAll(io.NewSectionReader(f, offset, info.Size()-offset))
+	if err != nil {
+		return nil, err
 	}
-	msg := job.Msg
-	if msg != "" {
-		if _, err := os.Stat(msg); err == nil {
-			return msg
+	if offset > 0 {
+		// drop the partial first line
+		if i := bytes.IndexByte(b, '\n'); i >= 0 {
+			b = b[i+1:]
 		}
 	}
-	repoPart := core.ToLocalRepo(job.Repo)
-	namePart := sanitizeLogToken(job.Name)
-	branchPart := sanitizeLogToken(job.Branch)
-	shaPart := sanitizeLogToken(shortLogSHA(job.SHA))
-	return filepath.Join(core.Root, "logs", repoPart, fmt.Sprintf("%s-%s-%s.log", namePart, branchPart, shaPart))
-}
 
-func sanitizeLogToken(s string) string {
-	out := strings.ReplaceAll(s, "/", "--")
-	out = strings.ReplaceAll(out, "\\", "--")
-	out = strings.ReplaceAll(out, ":", "_")
-	out = strings.ReplaceAll(out, " ", "_")
-	return out
+	rows := strings.Split(string(b), "\n")
+	if len(rows) > maxRows {
+		rows = rows[len(rows)-maxRows:]
+	}
+	return rows, nil
 }
 
 func renderRegion(title string, lines []string, helpText string, focused bool) string {

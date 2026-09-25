@@ -9,12 +9,43 @@ import (
 
 var Root, _ = os.Getwd()
 
-func LocalPath(path ...string) string {
-	return filepath.Join(append([]string{Root}, path...)...)
-}
-
 func ToLocalRepo(repo string) string {
 	return strings.ReplaceAll(repo, "/", "--")
+}
+
+// MirrorPath returns the bare mirror location of repo under the root.
+func MirrorPath(repo string) string {
+	return filepath.Join(Root, "repos", ToLocalRepo(strings.TrimSpace(repo)))
+}
+
+func ShortSHA(sha string) string {
+	s := strings.TrimSpace(sha)
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
+}
+
+// sanitizePathToken makes s safe to use as a single path element.
+func sanitizePathToken(s string) string {
+	out := strings.TrimSpace(s)
+	out = strings.ReplaceAll(out, "/", "--")
+	out = strings.ReplaceAll(out, "\\", "--")
+	out = strings.ReplaceAll(out, ":", "_")
+	out = strings.ReplaceAll(out, " ", "_")
+	return out
+}
+
+// ExpandHome expands a leading "~" to the user's home directory.
+func ExpandHome(path string) (string, error) {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, strings.TrimPrefix(path, "~")), nil
 }
 
 func ParseGithubUrl(rawURL string) string {
@@ -62,32 +93,4 @@ func normalizeGithubRepoPath(path string) string {
 		return ""
 	}
 	return owner + "/" + repo
-}
-
-func SafeIdx[T any](idx int, slice []T) (ret T) {
-	if len(slice) == 0 {
-		return ret
-	}
-	if idx >= len(slice) {
-		return slice[len(slice)-1]
-	}
-	return slice[idx]
-}
-
-func RemoveRepos(repos []CodeRepo, name string) (ret []CodeRepo) {
-	for _, repo := range repos {
-		if repo.Repo != name {
-			ret = append(ret, repo)
-		}
-	}
-	return ret
-}
-
-func RemoveJobConf(confs []JobConf, repo, name string) (ret []JobConf) {
-	for _, conf := range confs {
-		if conf.Name != name || conf.Repo != repo {
-			ret = append(ret, conf)
-		}
-	}
-	return ret
 }

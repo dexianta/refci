@@ -44,7 +44,7 @@ This creates:
 
 - `refci.db`
 - `repos/` (mirror repos)
-- `worktrees/` (per-branch worktrees)
+- `worktrees/` (one worktree per job and branch)
 - `logs/` (job logs + per-repo CI activity log)
 
 ### 3) Clone a repo mirror
@@ -141,7 +141,8 @@ Disable automatic fetch/poll (manual `R`/`C` in TUI still works, and no `.env` i
 refci --monitor ./repos/<repo-path>
 ```
 
-From a refci root, run without arguments to monitor recent jobs across all repositories. Press `P` to open the repo picker:
+From a refci root, run without arguments to monitor recent jobs across all repositories. Press `P` to open the repo picker.
+This view runs no jobs: restart jobs from the worker process, and cancel there while its worker is running:
 
 ```bash
 refci
@@ -177,8 +178,9 @@ Worker lifecycle:
 For daemon-style usage, run `refci` in `tmux`:
 
 When switching from separate `refci -e ...` instances, stop those old workers
-with Ctrl+C before starting the YAML run. Each repository should have only one
-polling worker, so the old instances do not compete with the new run.
+with Ctrl+C before starting the YAML run. Each repository can have only one
+polling worker; a second one exits with `another refci worker is already polling`
+(enforced by `logs/<repo>/worker.lock`).
 
 ```bash
 tmux new -d -s refci 'cd /path/to/refci-root && refci config.yml'
@@ -200,7 +202,7 @@ Per interval (default `3s`):
 
 Queued run behavior:
 
-- create/reset branch worktree to target SHA
+- create/reset the job's worktree for that branch to the target SHA (a missing script or checkout error is recorded as a failed job)
 - run `bash <script>` in that worktree
 - write stdout/stderr log under `logs/...`
 - update `jobs` row in sqlite
@@ -219,7 +221,7 @@ Jobs view:
 - `LEFT/RIGHT` or `PGUP/PGDOWN`: change page
 - `ENTER`: open log detail (stream the last 200 line of the file each second)
 - `L`: open CI activity log detail for the current repo, or the selected job's repo in the all-repositories view
-- `R`: rerun when the latest attempt for that job/branch is failed
+- `R`: rerun a failed/canceled job (worker processes only)
 - `C`: cancel selected running/pending job
 - `ESC` or `P` (job list): open the repo picker when launched with `refci` or `refci config.yml`
 - `ESC` or `ENTER` (detail): back

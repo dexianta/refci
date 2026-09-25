@@ -2,85 +2,41 @@ package core
 
 import (
 	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
 )
 
-// JobConfFile matches .refci/conf.yml as a top-level job map.
+// ParseJobConfs parses .refci/conf.yml, a top-level map of job name to job:
 //
 //	my-job:
 //	  branch_pattern: main
 //	  path_patterns:
 //	    - services/**
 //	  script: .refci/main.sh
-type JobConfFile map[string]JobConfSpec
-
-// JobConfSpec matches one job entry in .refci/conf.yml.
-type JobConfSpec struct {
-	BranchPattern string   `yaml:"branch_pattern"`
-	PathPatterns  []string `yaml:"path_patterns"`
-	Script        string   `yaml:"script"`
-}
-
-// LoadJobConfs loads job definitions from .refci/conf.yml format.
-func LoadJobConfs(path string) ([]JobConf, error) {
-	confPath := strings.TrimSpace(path)
-	if confPath == "" {
-		confPath = filepath.Join(".refci", "conf.yml")
-	}
-
-	data, err := os.ReadFile(confPath)
-	if err != nil {
-		return nil, fmt.Errorf("read job conf: %w", err)
-	}
-
-	return ParseJobConfs(string(data)), nil
-}
-
-func ParseJobConfs(raw string) []JobConf {
-	var file JobConfFile
+func ParseJobConfs(raw string) ([]JobConf, error) {
+	var file map[string]JobConf
 	if err := yaml.Unmarshal([]byte(raw), &file); err != nil {
-		return nil
-	}
-	if len(file) == 0 {
-		return nil
+		return nil, fmt.Errorf("parse .refci/conf.yml: %w", err)
 	}
 
-	normalized := make(map[string]JobConfSpec, len(file))
-	for name, spec := range file {
-		key := strings.TrimSpace(name)
-		if key == "" {
-			continue
+	out := make([]JobConf, 0, len(file))
+	for _, name := range slices.Sorted(maps.Keys(file)) {
+		conf := file[name]
+		conf.Name = strings.TrimSpace(name)
+		if conf.Name == "" {
+			return nil, fmt.Errorf("job name must not be empty")
 		}
-		if _, exists := normalized[key]; exists {
-			continue
+		if strings.TrimSpace(conf.ScriptPath) == "" {
+			return nil, fmt.Errorf("job %q: script is required", conf.Name)
 		}
-		normalized[key] = spec
+		pattern := normalizeBranchPattern(conf.BranchPattern)
+		if strings.Contains(strings.TrimSuffix(pattern, "*"), "*") {
+			return nil, fmt.Errorf("job %q: only a trailing wildcard is supported in branch_pattern %q", conf.Name, conf.BranchPattern)
+		}
+		out = append(out, conf)
 	}
-	if len(normalized) == 0 {
-		return nil
-	}
-
-	keys := make([]string, 0, len(normalized))
-	for key := range normalized {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-
-	out := make([]JobConf, 0, len(keys))
-	for _, name := range keys {
-		spec := normalized[name]
-		out = append(out, JobConf{
-			Name:          name,
-			BranchPattern: spec.BranchPattern,
-			PathPatterns:  spec.PathPatterns,
-			ScriptPath:    spec.Script,
-		})
-	}
-
-	return out
+	return out, nil
 }

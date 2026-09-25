@@ -55,7 +55,7 @@ func TestSelectedJobHighlightsEntireRow(t *testing.T) {
 		fixedCell("acme / api", repoColWidth),
 		fixedCell(job.Name, actionNameColWidth),
 		fixedCell(job.Branch, branchColWidth),
-		fixedCell(shortSHA(job.SHA), shaColWidth),
+		fixedCell(core.ShortSHA(job.SHA), shaColWidth),
 		fixedCell(job.CommitAuthor, authorColWidth),
 		fixedCell(statusTag(job.Status), statusColWidth),
 		fixedCell("--", elapsedColWidth),

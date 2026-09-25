@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"syscall"
@@ -125,7 +126,7 @@ func runClone(args []string) error {
 		return err
 	}
 
-	mirrorPath := filepath.Join(core.Root, "repos", core.ToLocalRepo(repo))
+	mirrorPath := core.MirrorPath(repo)
 	sshHost := refciSSHHostAlias(repo)
 	if err := ensureRefciSSHHost(sshHost, keyPath); err != nil {
 		return err
@@ -196,8 +197,8 @@ func runPollLoop(args []string) error {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	rerunCh := make(chan tui.RerunRequest, 8)
-	cancelCh := make(chan tui.CancelRequest, 8)
+	rerunCh := make(chan tui.JobRequest, 8)
+	cancelCh := make(chan tui.JobRequest, 8)
 	statusCh := make(chan tui.StatusEvent, 8)
 	workers := make(map[string]*repoWorker, len(configs))
 	defer func() {
@@ -242,8 +243,8 @@ func runMonitorPicker() error {
 	uiCtx, cancelUI := context.WithCancel(ctx)
 	defer cancelUI()
 
-	rerunCh := make(chan tui.RerunRequest, 8)
-	cancelCh := make(chan tui.CancelRequest, 8)
+	rerunCh := make(chan tui.JobRequest, 8)
+	cancelCh := make(chan tui.JobRequest, 8)
 	statusCh := make(chan tui.StatusEvent, 8)
 	done := make(chan struct{})
 
@@ -261,63 +262,39 @@ func runMonitorPicker() error {
 		defer close(done)
 		defer close(statusCh)
 
-		runners := map[string]*core.JobRunner{}
-		getRunner := func(repo string) (*core.JobRunner, error) {
-			repo = strings.TrimSpace(repo)
-			if repo == "" {
-				return nil, errors.New("repo is required")
-			}
-			if runner := runners[repo]; runner != nil {
-				return runner, nil
-			}
-			logger, err := core.NewCIActivityLogger(repo)
-			if err != nil {
-				return nil, err
-			}
-			runner := core.NewJobRunner(dbRepo)
-			runner.SetLogger(logger.Logf)
-			runners[repo] = runner
-			return runner, nil
-		}
-
+		// This process runs no jobs: restarts need a worker's env and must be
+		// owned by the worker, and cancel here only fixes up stale rows.
+		runner := core.NewJobRunner(dbRepo)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case req := <-rerunCh:
-				runner, err := getRunner(req.Repo)
-				if err == nil {
-					err = rerunJob(ctx, dbRepo, runner, runtimeConfig{Repo: req.Repo}, req)
-				}
-				if err != nil {
-					reportStatus(fmt.Sprintf("restart failed for %s/%s: %v", req.Name, req.Branch, err), true)
-					continue
-				}
-				reportStatus(fmt.Sprintf("restart started for %s/%s", req.Name, req.Branch), false)
+				reportStatus(fmt.Sprintf("restart %s/%s from the worker process (refci -e <env> <repo> or refci config.yml)", req.Name, req.Branch), true)
 			case req := <-cancelCh:
-				runner, err := getRunner(req.Repo)
-				if err == nil {
-					err = cancelJob(ctx, dbRepo, runner, req)
-				}
+				// A live worker holds the repo lock and owns the process; marking
+				// the row here would leave the job running.
+				lock, err := lockRepoWorker(req.Repo)
 				if err != nil {
-					reportStatus(fmt.Sprintf("cancel failed for %s/%s@%s: %v", req.Name, req.Branch, shortSHA(req.SHA), err), true)
+					reportStatus(fmt.Sprintf("cancel %s/%s from its worker process: %v", req.Name, req.Branch, err), true)
 					continue
 				}
-				reportStatus(fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, shortSHA(req.SHA)), false)
+				err = cancelJob(ctx, dbRepo, runner, req)
+				_ = lock.Close()
+				if err != nil {
+					reportStatus(fmt.Sprintf("cancel failed for %s/%s@%s: %v", req.Name, req.Branch, core.ShortSHA(req.SHA), err), true)
+					continue
+				}
+				reportStatus(fmt.Sprintf("cancel requested for %s/%s@%s", req.Name, req.Branch, core.ShortSHA(req.SHA)), false)
 			}
 		}
 	}()
 
-	if err := tui.RunRepoPicker(uiCtx, dbRepo, statusCh, rerunCh, cancelCh); err != nil {
-		stop()
-		cancelUI()
-		<-done
-		return err
-	}
+	err = tui.RunRepoPicker(uiCtx, dbRepo, statusCh, rerunCh, cancelCh)
 	stop()
 	cancelUI()
 	<-done
-	return nil
+	return err
 }
 
 func parseRuntimeConfig(repo, envPath string) (runtimeConfig, error) {
@@ -344,9 +321,7 @@ func parseRuntimeConfig(repo, envPath string) (runtimeConfig, error) {
 		}
 
 		key := strings.TrimSpace(parts[0])
-		val := strings.TrimSpace(parts[1])
-		val = strings.Trim(val, "\"")
-		val = strings.Trim(val, "'")
+		val := unquote(strings.TrimSpace(parts[1]))
 		if key == "" {
 			continue
 		}
@@ -358,6 +333,14 @@ func parseRuntimeConfig(repo, envPath string) (runtimeConfig, error) {
 	}
 
 	return cfg, nil
+}
+
+// unquote strips one pair of matching surrounding quotes.
+func unquote(v string) string {
+	if len(v) >= 2 && (v[0] == '"' || v[0] == '\'') && v[len(v)-1] == v[0] {
+		return v[1 : len(v)-1]
+	}
+	return v
 }
 
 func fetchMirror(ctx context.Context, mirrorPath string) error {
@@ -377,9 +360,9 @@ func normalizeSSHIdentityPath(path string) (string, error) {
 		return "", errors.New("clone requires -i <ssh-private-key>")
 	}
 
-	expanded, err := expandHomePath(raw)
+	expanded, err := core.ExpandHome(raw)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("resolve home directory: %w", err)
 	}
 	abs, err := filepath.Abs(expanded)
 	if err != nil {
@@ -396,20 +379,6 @@ func normalizeSSHIdentityPath(path string) (string, error) {
 		return "", fmt.Errorf("ssh private key is a directory: %s", abs)
 	}
 	return abs, nil
-}
-
-func expandHomePath(path string) (string, error) {
-	if path != "~" && !strings.HasPrefix(path, "~/") {
-		return path, nil
-	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("resolve home directory: %w", err)
-	}
-	if path == "~" {
-		return home, nil
-	}
-	return filepath.Join(home, strings.TrimPrefix(path, "~/")), nil
 }
 
 func refciSSHHostAlias(repo string) string {
@@ -530,10 +499,7 @@ func openDB() (*sql.DB, core.DbRepo, error) {
 		return nil, nil, err
 	}
 
-	db, err := core.OpenDB(core.DBConfig{
-		Kind:       core.DBSQLite,
-		SQLitePath: filepath.Join(core.Root, "refci.db"),
-	})
+	db, err := core.OpenDB(filepath.Join(core.Root, "refci.db"))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -587,71 +553,57 @@ func resolveRepoTarget(target string) (repo string, mirrorPath string, err error
 	if strings.Contains(repo, "--") && !strings.Contains(repo, "/") {
 		repo = strings.ReplaceAll(repo, "--", "/")
 	}
-	return repo, filepath.Join(core.Root, "repos", core.ToLocalRepo(repo)), nil
+	return repo, core.MirrorPath(repo), nil
 }
 
+// pollOnce queues jobs whose branch moved. A failure in one job or branch is
+// collected and does not stop the others from being checked.
 func pollOnce(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, cfg runtimeConfig, jobs []core.JobConf, logf func(string, ...any)) error {
+	var errs []error
 	for _, jc := range jobs {
 		branchSHA, err := core.ListBranchHeadsByPattern(ctx, cfg.Repo, jc.BranchPattern)
 		if err != nil {
 			logPollEvent(logf, "scan job=%s pattern=%q failed listing branches: %v", jc.Name, jc.BranchPattern, err)
-			return err
-		}
-		if len(branchSHA) == 0 {
-			logPollEvent(logf, "scan job=%s pattern=%q matched=0", jc.Name, jc.BranchPattern)
+			errs = append(errs, err)
 			continue
 		}
 
-		branches := sortedBranchNames(branchSHA)
-		results := make([]string, 0, len(branches))
-		queuedCount := 0
-		for _, branch := range branches {
+		for _, branch := range sortedBranchNames(branchSHA) {
 			sha := branchSHA[branch]
 			latestJob, err := dbRepo.LatestJobByNameBranch(cfg.Repo, jc.Name, branch)
 			if err != nil {
 				logPollEvent(logf, "scan job=%s branch=%s failed reading latest job: %v", jc.Name, branch, err)
-				return err
+				errs = append(errs, err)
+				continue
 			}
 			prevSHA := latestJob.SHA
 			if prevSHA == sha {
-				results = append(results, fmt.Sprintf("%s@%s=no-change", branch, shortSHA(sha)))
 				continue
 			}
 
 			shouldRun, err := core.ShouldRunByPathPatterns(ctx, cfg.Repo, prevSHA, sha, jc.PathPatterns)
 			if err != nil {
 				logPollEvent(logf, "scan job=%s branch=%s failed checking paths: %v", jc.Name, branch, err)
-				return err
+				errs = append(errs, err)
+				continue
 			}
 			if !shouldRun {
-				results = append(results, fmt.Sprintf("%s@%s=path-skip(prev=%s)", branch, shortSHA(sha), shortSHA(prevSHA)))
 				continue
 			}
 
 			jobConf := jc
 			jobConf.Repo = cfg.Repo
-			if err := runner.QueueJob(jobConf, cfg.Env, branch, sha); err != nil {
-				logPollEvent(logf, "queue job=%s branch=%s sha=%s failed: %v", jc.Name, branch, shortSHA(sha), err)
-				return err
-			}
-			queuedCount++
 			if prevSHA == "" {
-				results = append(results, fmt.Sprintf("%s@%s=queued(first-run)", branch, shortSHA(sha)))
-				continue
+				prevSHA = "first-run"
 			}
-			results = append(results, fmt.Sprintf("%s@%s=queued(prev=%s)", branch, shortSHA(sha), shortSHA(prevSHA)))
+			logPollEvent(logf, "queue job=%s branch=%s sha=%s prev=%s", jc.Name, branch, core.ShortSHA(sha), core.ShortSHA(prevSHA))
+			if err := runner.QueueJob(jobConf, cfg.Env, branch, sha); err != nil {
+				logPollEvent(logf, "queue job=%s branch=%s sha=%s failed: %v", jc.Name, branch, core.ShortSHA(sha), err)
+				errs = append(errs, fmt.Errorf("%s/%s: %w", jc.Name, branch, err))
+			}
 		}
-		logPollEvent(
-			logf,
-			"scan job=%s pattern=%q matched=%d queued=%d results=%s",
-			jc.Name,
-			jc.BranchPattern,
-			len(branches),
-			queuedCount,
-			strings.Join(results, ", "),
-		)
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 func sortedBranchNames(branchSHA map[string]string) []string {
@@ -670,7 +622,7 @@ func logPollEvent(logf func(string, ...any), format string, args ...any) {
 	logf(format, args...)
 }
 
-func rerunJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, cfg runtimeConfig, req tui.RerunRequest) error {
+func rerunJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, cfg runtimeConfig, req tui.JobRequest) error {
 	if strings.TrimSpace(req.RunID) == "" || strings.TrimSpace(req.Name) == "" || strings.TrimSpace(req.Branch) == "" || strings.TrimSpace(req.SHA) == "" {
 		return errors.New("invalid restart request")
 	}
@@ -679,8 +631,7 @@ func rerunJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, c
 	if err != nil {
 		return err
 	}
-	status := strings.ToLower(strings.TrimSpace(jobRow.Status))
-	if status != core.StatusFailed && status != core.StatusCanceled {
+	if jobRow.Status != core.StatusFailed && jobRow.Status != core.StatusCanceled {
 		return fmt.Errorf("job status is %q; only failed/canceled jobs can be restarted", jobRow.Status)
 	}
 
@@ -688,8 +639,7 @@ func rerunJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, c
 	if err != nil {
 		return err
 	}
-	latestStatus := strings.ToLower(strings.TrimSpace(latestJob.Status))
-	if latestJob.RunID != "" && latestJob.RunID != jobRow.RunID && (latestStatus == core.StatusRunning || latestStatus == core.StatusPending) {
+	if latestJob.RunID != "" && latestJob.RunID != jobRow.RunID && (latestJob.Status == core.StatusRunning || latestJob.Status == core.StatusPending) {
 		return fmt.Errorf("latest job %s/%s is %q; cancel it before restarting an older run", req.Name, req.Branch, latestJob.Status)
 	}
 
@@ -697,19 +647,17 @@ func rerunJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, c
 	if err != nil {
 		return fmt.Errorf("load .refci/conf.yml: %w", err)
 	}
-	jobConf, err := findRerunJobConf(jobConfs, req.Name, req.Branch)
-	if err != nil {
-		return err
+	idx := slices.IndexFunc(jobConfs, func(jc core.JobConf) bool { return jc.Name == req.Name })
+	if idx < 0 {
+		return fmt.Errorf("job config %q not found", req.Name)
 	}
+	jobConf := jobConfs[idx]
 	jobConf.Repo = cfg.Repo
 
-	if err := runner.RerunJob(jobConf, cfg.Env, req.Branch, jobRow.SHA); err != nil {
-		return err
-	}
-	return nil
+	return runner.RerunJob(jobConf, cfg.Env, req.Branch, jobRow.SHA)
 }
 
-func cancelJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, req tui.CancelRequest) error {
+func cancelJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, req tui.JobRequest) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -721,21 +669,16 @@ func cancelJob(ctx context.Context, dbRepo core.DbRepo, runner *core.JobRunner, 
 	if err != nil {
 		return err
 	}
-	status := strings.ToLower(strings.TrimSpace(jobRow.Status))
-	if status != core.StatusRunning && status != core.StatusPending {
+	if jobRow.Status != core.StatusRunning && jobRow.Status != core.StatusPending {
 		return fmt.Errorf("job status is %q; only running/pending jobs can be canceled", jobRow.Status)
 	}
 
-	if err := runner.Cancel(jobRow); err == nil {
-		return nil
-	} else if strings.Contains(err.Error(), "job is not running") {
-		if err := dbRepo.UpdateJob(jobRow.RunID, core.StatusCanceled, "canceled by user (stale job state)", ""); err != nil {
-			return err
-		}
-		return nil
-	} else {
-		return err
+	err = runner.Cancel(jobRow)
+	if errors.Is(err, core.ErrJobNotRunning) {
+		// no process in this refci instance; just fix up the stale row
+		return dbRepo.UpdateJob(jobRow.RunID, core.StatusCanceled, "canceled by user (stale job state)", "")
 	}
+	return err
 }
 
 func markRepoJobsCanceled(dbRepo core.DbRepo, repo, reason string, logf func(string, ...any)) (int, error) {
@@ -760,7 +703,7 @@ func markRepoJobsCanceled(dbRepo core.DbRepo, repo, reason string, logf func(str
 				"mark stale job canceled name=%s branch=%s sha=%s previous_status=%s",
 				job.Name,
 				job.Branch,
-				shortSHA(job.SHA),
+				core.ShortSHA(job.SHA),
 				status,
 			)
 		}
@@ -781,73 +724,6 @@ func findJobByRunID(dbRepo core.DbRepo, runID string) (core.Job, error) {
 		return core.Job{}, fmt.Errorf("job not found: %s", runIDValue)
 	}
 	return job, nil
-}
-
-func findRerunJobConf(jobConfs []core.JobConf, name, branch string) (core.JobConf, error) {
-	nameValue := strings.TrimSpace(name)
-	branchValue := normalizeBranch(branch)
-	if nameValue == "" || branchValue == "" {
-		return core.JobConf{}, errors.New("job name and branch are required")
-	}
-
-	var matched []core.JobConf
-	var sameName []core.JobConf
-	for _, jc := range jobConfs {
-		if strings.TrimSpace(jc.Name) != nameValue {
-			continue
-		}
-		sameName = append(sameName, jc)
-		if branchMatchesForRerun(branchValue, jc.BranchPattern) {
-			matched = append(matched, jc)
-		}
-	}
-
-	if len(matched) == 1 {
-		return matched[0], nil
-	}
-	if len(matched) > 1 {
-		return core.JobConf{}, fmt.Errorf("multiple job configs match %q on branch %q", nameValue, branchValue)
-	}
-	if len(sameName) == 1 {
-		return sameName[0], nil
-	}
-	if len(sameName) > 1 {
-		return core.JobConf{}, fmt.Errorf("multiple job configs share name %q; cannot choose for branch %q", nameValue, branchValue)
-	}
-	return core.JobConf{}, fmt.Errorf("job config %q not found", nameValue)
-}
-
-func branchMatchesForRerun(branch, pattern string) bool {
-	p := normalizeBranch(pattern)
-	if p == "" {
-		p = "*"
-	}
-	if p == "*" {
-		return true
-	}
-	if strings.Contains(p, "*") {
-		// Keep matching behavior aligned with refci polling: only trailing wildcard is supported.
-		if strings.Count(p, "*") != 1 || !strings.HasSuffix(p, "*") {
-			return false
-		}
-		return strings.HasPrefix(branch, strings.TrimSuffix(p, "*"))
-	}
-	return branch == p
-}
-
-func normalizeBranch(v string) string {
-	s := strings.TrimSpace(v)
-	s = strings.TrimPrefix(s, "refs/heads/")
-	s = strings.TrimPrefix(s, "refs/")
-	return s
-}
-
-func shortSHA(sha string) string {
-	s := strings.TrimSpace(sha)
-	if len(s) <= 8 {
-		return s
-	}
-	return s[:8]
 }
 
 func isHelpArg(v string) bool {

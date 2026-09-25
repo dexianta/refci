@@ -1,8 +1,8 @@
 package core
 
 import (
-	"context"
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -209,7 +209,7 @@ func TestJobRunnerKillsBackgroundWritersOnExit(t *testing.T) {
 		ScriptPath: scriptPath,
 		WorkDir:    workDir,
 	}
-	logPath, err := runner.Start(context.Background(), req)
+	logPath, err := runner.Start(req)
 	if err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
@@ -260,7 +260,7 @@ func TestJobRunnerStopWaitsForProcessesAndStatus(t *testing.T) {
 	defer runner.Stop()
 	pids := map[string]int{}
 	for _, runID := range []string{"first", "second"} {
-		if _, err := runner.Start(context.Background(), RunJobRequest{
+		if _, err := runner.Start(RunJobRequest{
 			RunID: runID, Repo: "acme/test", Name: "build", Branch: runID,
 			SHA: "abc123", ScriptPath: script, WorkDir: Root,
 		}); err != nil {
@@ -276,9 +276,52 @@ func TestJobRunnerStopWaitsForProcessesAndStatus(t *testing.T) {
 			t.Errorf("process %d is still present after Stop: %v", pid, err)
 		}
 		job, err := repo.JobByRunID(runID)
-		if err != nil || job.Status != StatusCanceled || runner.IsRunning(runID) {
+		if err != nil || job.Status != StatusCanceled || len(runner.running) != 0 {
 			t.Errorf("job %s did not finish cancellation: %+v, %v", runID, job, err)
 		}
+	}
+}
+
+func TestJobRunnerCancelLetsScriptTrapTerm(t *testing.T) {
+	oldRoot := Root
+	Root = t.TempDir()
+	defer func() { Root = oldRoot }()
+	repo, err := NewSQLiteRepo(openTestDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := filepath.Join(Root, "job.sh")
+	body := "trap 'echo trapped; exit 0' TERM\necho ready\nsleep 60 & wait\n"
+	if err := os.WriteFile(script, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewJobRunner(repo)
+	logPath, err := runner.Start(RunJobRequest{
+		RunID: "run", Repo: "acme/test", Name: "build", Branch: "main",
+		SHA: "abc123", ScriptPath: script, WorkDir: Root,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		if b, _ := os.ReadFile(logPath); strings.Contains(string(b), "ready") {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("script never started")
+		}
+	}
+	if err := runner.Cancel(Job{RunID: "run"}); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := os.ReadFile(logPath); !strings.Contains(string(b), "trapped") {
+		t.Fatalf("TERM trap did not run, log: %q", b)
+	}
+	if job, _ := repo.JobByRunID("run"); job.Status != StatusCanceled {
+		t.Fatalf("status = %q, want canceled", job.Status)
+	}
+	if err := runner.Cancel(Job{RunID: "run"}); !errors.Is(err, ErrJobNotRunning) {
+		t.Fatalf("second Cancel error = %v, want ErrJobNotRunning", err)
 	}
 }
 
@@ -286,10 +329,7 @@ func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 
 	path := filepath.Join(t.TempDir(), "test.db")
-	db, err := OpenDB(DBConfig{
-		Kind:       DBSQLite,
-		SQLitePath: path,
-	})
+	db, err := OpenDB(path)
 	if err != nil {
 		t.Fatalf("OpenDB() error = %v", err)
 	}

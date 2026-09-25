@@ -125,8 +125,8 @@ func TestRepoWorkersPollRerunCancelAndStop(t *testing.T) {
 	ctx, stop := context.WithCancel(context.Background())
 	workers := map[string]*repoWorker{}
 	statusCh := make(chan tui.StatusEvent, 64)
-	rerunCh := make(chan tui.RerunRequest, 8)
-	cancelCh := make(chan tui.CancelRequest, 8)
+	rerunCh := make(chan tui.JobRequest, 8)
+	cancelCh := make(chan tui.JobRequest, 8)
 	routerDone := make(chan struct{})
 	defer func() {
 		stop()
@@ -172,7 +172,7 @@ func TestRepoWorkersPollRerunCancelAndStop(t *testing.T) {
 		if err != nil || string(body) != name {
 			t.Fatalf("%s env output = %q, error = %v", name, body, err)
 		}
-		rerunCh <- tui.RerunRequest{RunID: job.RunID, Repo: job.Repo, Name: job.Name, Branch: job.Branch, SHA: job.SHA}
+		rerunCh <- tui.JobRequest{RunID: job.RunID, Repo: job.Repo, Name: job.Name, Branch: job.Branch, SHA: job.SHA}
 		job = waitJob(job.Repo, 2, core.StatusFailed)
 		body, err = os.ReadFile(job.LogPath)
 		if err != nil || string(body) != name {
@@ -185,7 +185,7 @@ func TestRepoWorkersPollRerunCancelAndStop(t *testing.T) {
 	}
 	api := waitJob("acme/api", 3, core.StatusRunning)
 	web := waitJob("acme/web", 3, core.StatusRunning)
-	cancelCh <- tui.CancelRequest{RunID: web.RunID, Repo: web.Repo, Name: web.Name, Branch: web.Branch, SHA: web.SHA}
+	cancelCh <- tui.JobRequest{RunID: web.RunID, Repo: web.Repo, Name: web.Name, Branch: web.Branch, SHA: web.SHA}
 	waitJob(web.Repo, 3, core.StatusCanceled)
 	waitJob(api.Repo, 3, core.StatusRunning)
 	stop()
@@ -297,4 +297,99 @@ func TestWorkerConfigDetectionWithYAMLRepoNames(t *testing.T) {
 			t.Fatalf("config file %q misclassified as a repo", name)
 		}
 	}
+}
+
+func TestPollOnceRecordsPrepareFailureAndContinues(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	oldRoot := core.Root
+	t.Cleanup(func() { core.Root = oldRoot })
+	if err := core.InitRoot(root); err != nil {
+		t.Fatal(err)
+	}
+	db, dbRepo, err := openDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	source := filepath.Join(root, "src")
+	if err := os.MkdirAll(filepath.Join(source, ".refci"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	conf := "a-broken:\n  branch_pattern: main\n  script: .refci/missing.sh\nb-ok:\n  branch_pattern: main\n  script: .refci/ok.sh\n"
+	for path, body := range map[string]string{".refci/conf.yml": conf, ".refci/ok.sh": "exit 0\n"} {
+		if err := os.WriteFile(filepath.Join(source, path), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{
+		{"init", "-b", "main"}, {"add", "."}, {"commit", "-m", "init"},
+		{"clone", "--mirror", source, core.MirrorPath("acme/app")},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = source
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	runner := core.NewJobRunner(dbRepo)
+	defer runner.Stop()
+	cfg := runtimeConfig{Repo: "acme/app"}
+	jobs, err := core.LoadJobConfsFromRepo(context.Background(), cfg.Repo, "HEAD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := pollOnce(context.Background(), dbRepo, runner, cfg, jobs, nil); err == nil || !strings.Contains(err.Error(), "script not found") {
+		t.Fatalf("pollOnce error = %v, want script not found", err)
+	}
+	broken, _ := dbRepo.LatestJobByNameBranch(cfg.Repo, "a-broken", "main")
+	if broken.Status != core.StatusFailed || !strings.Contains(broken.Msg, "script not found") {
+		t.Fatalf("broken job not recorded as failed: %+v", broken)
+	}
+	if ok, _ := dbRepo.LatestJobByNameBranch(cfg.Repo, "b-ok", "main"); ok.RunID == "" {
+		t.Fatal("a failing job blocked the next job from being queued")
+	}
+	// the failure is recorded, so the next tick does not retry it
+	if err := pollOnce(context.Background(), dbRepo, runner, cfg, jobs, nil); err != nil {
+		t.Fatalf("second pollOnce error = %v", err)
+	}
+}
+
+func TestRepoWorkerLockRejectsSecondPoller(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	oldRoot := core.Root
+	t.Cleanup(func() { core.Root = oldRoot })
+	if err := core.InitRoot(root); err != nil {
+		t.Fatal(err)
+	}
+	db, dbRepo, err := openDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	cfg := runtimeConfig{Repo: "acme/app", MirrorPath: core.MirrorPath("acme/app")}
+	statusCh := make(chan tui.StatusEvent, 64)
+	ctx, stop := context.WithCancel(context.Background())
+	first, err := startRepoWorker(ctx, dbRepo, cfg, time.Hour, false, statusCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := startRepoWorker(context.Background(), dbRepo, cfg, time.Hour, false, statusCh); err == nil || !strings.Contains(err.Error(), "already polling") {
+		t.Fatalf("second worker error = %v, want already polling", err)
+	}
+	if _, err := lockRepoWorker(cfg.Repo); err == nil {
+		t.Fatal("monitor cancel must see the live worker's lock")
+	}
+	stop()
+	<-first.done
+	lock, err := lockRepoWorker(cfg.Repo)
+	if err != nil {
+		t.Fatalf("lock not released after worker stopped: %v", err)
+	}
+	_ = lock.Close()
 }
