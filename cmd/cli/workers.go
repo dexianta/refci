@@ -9,8 +9,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -102,6 +104,76 @@ type repoWorker struct {
 	rerunCh  chan tui.JobRequest
 	cancelCh chan tui.JobRequest
 	done     chan struct{}
+	stop     context.CancelFunc
+	config   atomic.Pointer[runtimeConfig]
+}
+
+const configReloadInterval = 3 * time.Second
+
+// Stage additions before changing existing workers. If any addition cannot start,
+// release its resources and leave the previous configuration in effect.
+func reloadRepoWorkers(ctx context.Context, dbRepo core.DbRepo, workers map[string]*repoWorker, path string, interval time.Duration, statusCh chan<- tui.StatusEvent) (bool, error) {
+	configs, err := loadWorkerConfigs(path)
+	if err != nil {
+		return false, err
+	}
+	ready := make(chan struct{})
+	added := make(map[string]*repoWorker)
+	applied := false
+	defer func() {
+		if !applied {
+			for _, worker := range added {
+				worker.stop()
+			}
+			for _, worker := range added {
+				<-worker.done
+			}
+		}
+	}()
+	for _, cfg := range configs {
+		if workers[cfg.Repo] != nil {
+			continue
+		}
+		worker, err := prepareRepoWorker(ctx, dbRepo, cfg, interval, false, statusCh, ready)
+		if err != nil {
+			return false, fmt.Errorf("%s: %w", cfg.Repo, err)
+		}
+		added[cfg.Repo] = worker
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+
+	changed := len(added) > 0
+	wanted := make(map[string]bool, len(configs))
+	for _, cfg := range configs {
+		wanted[cfg.Repo] = true
+		worker := workers[cfg.Repo]
+		if worker == nil {
+			workers[cfg.Repo] = added[cfg.Repo]
+			continue
+		}
+		previous := worker.config.Load()
+		if previous.MirrorPath != cfg.MirrorPath || !slices.Equal(previous.Env, cfg.Env) {
+			worker.config.Store(&cfg)
+			changed = true
+		}
+	}
+	for repo, worker := range workers {
+		if !wanted[repo] {
+			worker.stop()
+		}
+	}
+	for repo, worker := range workers {
+		if !wanted[repo] {
+			<-worker.done
+			delete(workers, repo)
+			changed = true
+		}
+	}
+	applied = true
+	close(ready)
+	return changed, nil
 }
 
 func reportWorkerStatus(ctx context.Context, statusCh chan<- tui.StatusEvent, repo, msg string, isErr bool) bool {
@@ -116,11 +188,30 @@ func reportWorkerStatus(ctx context.Context, statusCh chan<- tui.StatusEvent, re
 	}
 }
 
-func routeWorkerRequests(ctx context.Context, workers map[string]*repoWorker, statusCh chan<- tui.StatusEvent, rerunCh <-chan tui.JobRequest, cancelCh <-chan tui.JobRequest) {
+// This loop owns the worker map, serializing config changes with UI requests.
+func routeWorkerRequests(ctx context.Context, workers map[string]*repoWorker, statusCh chan<- tui.StatusEvent, rerunCh <-chan tui.JobRequest, cancelCh <-chan tui.JobRequest, dbRepo core.DbRepo, configPath string, interval time.Duration) {
+	var reloadCh <-chan time.Time
+	if configPath != "" {
+		ticker := time.NewTicker(configReloadInterval)
+		defer ticker.Stop()
+		reloadCh = ticker.C
+	}
+	lastReloadError := ""
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-reloadCh:
+			changed, err := reloadRepoWorkers(ctx, dbRepo, workers, configPath, interval, statusCh)
+			if err != nil {
+				if msg := err.Error(); msg != lastReloadError && reportWorkerStatus(ctx, statusCh, "config", "reload failed; keeping previous configuration: "+msg, true) {
+					lastReloadError = msg
+				}
+			} else if changed || lastReloadError != "" {
+				if reportWorkerStatus(ctx, statusCh, "config", "configuration reloaded", false) {
+					lastReloadError = ""
+				}
+			}
 		case req := <-rerunCh:
 			worker := workers[req.Repo]
 			if worker == nil {
@@ -169,6 +260,10 @@ func lockRepoWorker(repo string) (*os.File, error) {
 }
 
 func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig, interval time.Duration, monitorMode bool, statusCh chan<- tui.StatusEvent) (*repoWorker, error) {
+	return prepareRepoWorker(ctx, dbRepo, cfg, interval, monitorMode, statusCh, nil)
+}
+
+func prepareRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig, interval time.Duration, monitorMode bool, statusCh chan<- tui.StatusEvent, ready <-chan struct{}) (*repoWorker, error) {
 	ciLogger, err := core.NewCIActivityLogger(cfg.Repo)
 	if err != nil {
 		return nil, err
@@ -207,11 +302,23 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 		modeLabel = "monitor"
 	}
 	ciLogger.Logf("worker start repo=%s mode=%s interval=%s", cfg.Repo, modeLabel, interval.String())
+	ctx, stop := context.WithCancel(ctx)
+	worker := &repoWorker{rerunCh: rerunCh, cancelCh: cancelCh, done: done, stop: stop}
+	worker.config.Store(&cfg)
+	runner.SetEnv(func() []string { return worker.config.Load().Env })
 
 	go func() {
 		defer close(done)
+		defer stop()
 		if lock != nil {
 			defer lock.Close()
+		}
+		if ready != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ready:
+			}
 		}
 
 		doPoll := func() {}
@@ -226,6 +333,7 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 				}
 				var loopErr error
 				started := time.Now()
+				cfg := *worker.config.Load()
 
 				// Only failures and queue decisions are logged; quiet ticks would
 				// otherwise add several lines to ci.log every interval.
@@ -236,7 +344,7 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 					loopErr = fmt.Errorf("load .refci/conf.yml: %w", err)
 				} else if len(jobs) == 0 {
 					loopErr = fmt.Errorf("no jobs found in .refci/conf.yml for %s", cfg.Repo)
-				} else if err := pollOnce(ctx, dbRepo, runner, cfg, jobs, ciLogger.Logf); err != nil {
+				} else if err := pollOnce(ctx, runner, cfg, jobs, ciLogger.Logf); err != nil {
 					loopErr = fmt.Errorf("poll failed: %w", err)
 				}
 
@@ -276,7 +384,7 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 				return
 			case req := <-rerunCh:
 				ciLogger.Logf("rerun requested job=%s branch=%s sha=%s", req.Name, req.Branch, core.ShortSHA(req.SHA))
-				if err := rerunJob(ctx, dbRepo, runner, cfg, req); err != nil {
+				if err := rerunJob(ctx, dbRepo, runner, *worker.config.Load(), req); err != nil {
 					ciLogger.Logf("rerun failed job=%s branch=%s sha=%s: %v", req.Name, req.Branch, core.ShortSHA(req.SHA), err)
 					reportStatus(fmt.Sprintf("restart failed for %s/%s: %v", req.Name, req.Branch, err), true)
 					continue
@@ -298,5 +406,5 @@ func startRepoWorker(ctx context.Context, dbRepo core.DbRepo, cfg runtimeConfig,
 		}
 	}()
 
-	return &repoWorker{rerunCh: rerunCh, cancelCh: cancelCh, done: done}, nil
+	return worker, nil
 }

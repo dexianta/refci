@@ -86,3 +86,33 @@ func TestAllReposCILogUsesSelectedJobRepo(t *testing.T) {
 		t.Fatal("all-repositories CI log does not use the selected job's repo")
 	}
 }
+
+func TestRestartJobStatuses(t *testing.T) {
+	for _, status := range []string{core.StatusFinished, core.StatusFailed, core.StatusCanceled, core.StatusRunning, core.StatusPending, "unknown"} {
+		t.Run(status, func(t *testing.T) {
+			ch := make(chan JobRequest, 1)
+			job := core.Job{RunID: "original-run", Repo: "acme/api", Name: "build", Branch: "main", SHA: "original-commit", Status: status}
+			m := logsModel{jobs: []core.Job{job}, rerunCh: ch}
+			m, cmd, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
+			allowed := status == core.StatusFinished || status == core.StatusFailed || status == core.StatusCanceled
+			if !allowed {
+				if cmd != nil || !m.statusInErr {
+					t.Fatal("active or unknown job status allowed a restart")
+				}
+				return
+			}
+			if cmd == nil {
+				t.Fatal("completed job cannot be restarted")
+			}
+			cmd()
+			select {
+			case req := <-ch:
+				if req.RunID != job.RunID || req.SHA != job.SHA || req.Repo != job.Repo || req.Name != job.Name || req.Branch != job.Branch {
+					t.Fatalf("restart changed the selected run: %+v", req)
+				}
+			default:
+				t.Fatal("restart request not delivered")
+			}
+		})
+	}
+}

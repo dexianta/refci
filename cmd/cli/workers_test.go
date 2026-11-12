@@ -147,7 +147,7 @@ func TestRepoWorkersPollRerunCancelAndStop(t *testing.T) {
 	}
 	go func() {
 		defer close(routerDone)
-		routeWorkerRequests(ctx, workers, statusCh, rerunCh, cancelCh)
+		routeWorkerRequests(ctx, workers, statusCh, rerunCh, cancelCh, dbRepo, "", time.Second)
 	}()
 	defer func() { stop(); <-routerDone }()
 	waitJob := func(repo string, count int, status string) core.Job {
@@ -342,7 +342,7 @@ func TestPollOnceRecordsPrepareFailureAndContinues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := pollOnce(context.Background(), dbRepo, runner, cfg, jobs, nil); err == nil || !strings.Contains(err.Error(), "script not found") {
+	if err := pollOnce(context.Background(), runner, cfg, jobs, nil); err == nil || !strings.Contains(err.Error(), "script not found") {
 		t.Fatalf("pollOnce error = %v, want script not found", err)
 	}
 	broken, _ := dbRepo.LatestJobByNameBranch(cfg.Repo, "a-broken", "main")
@@ -353,7 +353,7 @@ func TestPollOnceRecordsPrepareFailureAndContinues(t *testing.T) {
 		t.Fatal("a failing job blocked the next job from being queued")
 	}
 	// the failure is recorded, so the next tick does not retry it
-	if err := pollOnce(context.Background(), dbRepo, runner, cfg, jobs, nil); err != nil {
+	if err := pollOnce(context.Background(), runner, cfg, jobs, nil); err != nil {
 		t.Fatalf("second pollOnce error = %v", err)
 	}
 }
@@ -392,4 +392,223 @@ func TestRepoWorkerLockRejectsSecondPoller(t *testing.T) {
 		t.Fatalf("lock not released after worker stopped: %v", err)
 	}
 	_ = lock.Close()
+}
+
+func TestWorkerConfigReload(t *testing.T) {
+	root := t.TempDir()
+	t.Chdir(root)
+	oldRoot := core.Root
+	t.Cleanup(func() { core.Root = oldRoot })
+	if err := core.InitRoot(root); err != nil {
+		t.Fatal(err)
+	}
+	db, dbRepo, err := openDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	write := func(path, body string) {
+		t.Helper()
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	git := func(dir string, args ...string) {
+		t.Helper()
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_NOSYSTEM=1", "GIT_AUTHOR_NAME=Test", "GIT_AUTHOR_EMAIL=test@example.com", "GIT_COMMITTER_NAME=Test", "GIT_COMMITTER_EMAIL=test@example.com")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+	source := filepath.Join(root, "source")
+	if err := os.MkdirAll(filepath.Join(source, ".refci"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	write(filepath.Join(source, ".refci/conf.yml"), "build: {branch_pattern: main, script: .refci/run.sh}\n")
+	write(filepath.Join(source, ".refci/run.sh"), "printf '%s' \"$WORKER_TOKEN\"\nif [ -n \"$WAIT_FILE\" ]; then while [ ! -f \"$WAIT_FILE\" ]; do sleep 0.05; done; fi\n")
+	git(source, "init", "-b", "main")
+	git(source, "add", ".")
+	git(source, "commit", "-m", "original job")
+	for _, name := range []string{"api", "web", "staged"} {
+		git(root, "clone", "--mirror", source, core.MirrorPath("acme/"+name))
+	}
+	write("api.env", "WORKER_TOKEN=original\nWAIT_FILE="+filepath.Join(root, "release")+"\n")
+	write("web.env", "WORKER_TOKEN=web\n")
+	originalYAML := "api: {repo: acme--api, env: api.env}\n"
+	write("config.yml", originalYAML)
+	configs, err := loadWorkerConfigs("config.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, stop := context.WithCancel(context.Background())
+	workers := map[string]*repoWorker{}
+	statusCh := make(chan tui.StatusEvent, 64)
+	routerDone := make(chan struct{})
+	routerStarted := false
+	defer func() {
+		stop()
+		if routerStarted {
+			<-routerDone
+		}
+		for _, worker := range workers {
+			<-worker.done
+		}
+	}()
+	worker, err := startRepoWorker(ctx, dbRepo, configs[0], time.Hour, false, statusCh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workers[configs[0].Repo] = worker
+	waitJob := func(repo string, count int, status string) core.Job {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			jobs, err := dbRepo.ListJob(core.JobFilter{Repo: repo})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(jobs) == count && jobs[0].Status == status {
+				return jobs[0]
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatalf("%s did not reach %d jobs with latest status %s", repo, count, status)
+		return core.Job{}
+	}
+	original := waitJob("acme/api", 1, core.StatusRunning)
+	if changed, err := reloadRepoWorkers(ctx, dbRepo, workers, "config.yml", time.Hour, statusCh); err != nil || changed {
+		t.Fatalf("unchanged reload = %v, %v", changed, err)
+	}
+	// No part of an invalid config, including updated env values, is applied.
+	write("api.env", "WORKER_TOKEN=updated\n")
+	for _, invalid := range []string{
+		"api: [", "{}", "api: {repo: acme--api, env: api.env, typo: true}",
+		originalYAML + "other: {repo: acme--api, env: api.env}\n",
+		originalYAML + "web: {repo: acme--web, env: missing.env}\n",
+	} {
+		write("config.yml", invalid)
+		if _, err := reloadRepoWorkers(ctx, dbRepo, workers, "config.yml", time.Hour, statusCh); err == nil {
+			t.Fatalf("invalid config accepted: %s", invalid)
+		}
+		if len(workers) != 1 || workers["acme/api"] != worker || !reflect.DeepEqual(worker.config.Load().Env, configs[0].Env) {
+			t.Fatal("invalid reload changed the previous configuration")
+		}
+	}
+	if err := os.Remove("config.yml"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := reloadRepoWorkers(ctx, dbRepo, workers, "config.yml", time.Hour, statusCh); err == nil {
+		t.Fatal("missing config accepted")
+	}
+	// A startup failure must roll back all staged additions before they run jobs.
+	locked, err := lockRepoWorker("acme/locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	write("config.yml", originalYAML+"staged: {repo: acme--staged, env: web.env}\nzlocked: {repo: acme--locked, env: web.env}\n")
+	_, reloadErr := reloadRepoWorkers(ctx, dbRepo, workers, "config.yml", time.Hour, statusCh)
+	_ = locked.Close()
+	if reloadErr == nil || !strings.Contains(reloadErr.Error(), "already polling") {
+		t.Fatalf("locked addition error = %v", reloadErr)
+	}
+	if len(workers) != 1 || !reflect.DeepEqual(worker.config.Load().Env, configs[0].Env) {
+		t.Fatal("failed addition changed the previous configuration")
+	}
+	stagedJobs, err := dbRepo.ListJob(core.JobFilter{Repo: "acme/staged"})
+	if err != nil || len(stagedJobs) != 0 {
+		t.Fatalf("staged worker ran jobs before commit: %v, %v", stagedJobs, err)
+	}
+	lock, err := lockRepoWorker("acme/staged")
+	if err != nil {
+		t.Fatalf("staged worker leaked its lock: %v", err)
+	}
+	_ = lock.Close()
+
+	// Exercise the actual 3-second ticker, independently of the hourly job poll.
+	write("config.yml", originalYAML+"web: {repo: acme--web, env: web.env}\n")
+	rerunCh := make(chan tui.JobRequest, 8)
+	routerStarted = true
+	go func() {
+		defer close(routerDone)
+		routeWorkerRequests(ctx, workers, statusCh, rerunCh, nil, dbRepo, "config.yml", time.Hour)
+	}()
+	waitReload := func(wantError bool) {
+		t.Helper()
+		timer := time.NewTimer(10 * time.Second)
+		defer timer.Stop()
+		for {
+			select {
+			case status := <-statusCh:
+				if strings.HasPrefix(status.Message, "config: ") && status.IsError == wantError {
+					return
+				}
+			case <-timer.C:
+				t.Fatalf("no config reload status (error=%v)", wantError)
+			}
+		}
+	}
+	waitReload(false)
+	waitJob("acme/web", 1, core.StatusFinished)
+	if job := waitJob("acme/api", 1, core.StatusRunning); job.RunID != original.RunID {
+		t.Fatal("env update restarted the running job")
+	}
+	if !reflect.DeepEqual(worker.config.Load().Env, []string{"WORKER_TOKEN=updated"}) {
+		t.Fatal("env update did not reach the existing worker")
+	}
+	write("release", "")
+	waitJob("acme/api", 1, core.StatusFinished)
+	body, err := os.ReadFile(original.LogPath)
+	if err != nil || string(body) != "original" {
+		t.Fatalf("running job env changed: %q, %v", body, err)
+	}
+	// Successful restarts use the original commit even after HEAD moves.
+	write(filepath.Join(source, ".refci/run.sh"), "printf 'latest-commit'\n")
+	git(source, "add", ".")
+	git(source, "commit", "-m", "newer job")
+	if err := fetchMirror(ctx, core.MirrorPath("acme/api")); err != nil {
+		t.Fatal(err)
+	}
+	rerunCh <- tui.JobRequest{RunID: original.RunID, Repo: original.Repo, Name: original.Name, Branch: original.Branch, SHA: original.SHA}
+	rerun := waitJob("acme/api", 2, core.StatusFinished)
+	body, err = os.ReadFile(rerun.LogPath)
+	if err != nil || string(body) != "updated" || rerun.SHA != original.SHA || rerun.RunID == original.RunID {
+		t.Fatalf("successful restart changed commit or missed new env: %+v, output=%q, err=%v", rerun, body, err)
+	}
+	// An unreadable env file rejects the entire reload, then recovers automatically.
+	if err := os.Remove("web.env"); err != nil {
+		t.Fatal(err)
+	}
+	write("api.env", "WORKER_TOKEN=newest\nWAIT_FILE="+filepath.Join(root, "removed-release")+"\n")
+	waitReload(true)
+	if !reflect.DeepEqual(worker.config.Load().Env, []string{"WORKER_TOKEN=updated"}) {
+		t.Fatal("partially applied a reload with an unreadable env file")
+	}
+	write("web.env", "WORKER_TOKEN=web\n")
+	waitReload(false)
+	if !reflect.DeepEqual(worker.config.Load().Env, []string{"WORKER_TOKEN=newest", "WAIT_FILE=" + filepath.Join(root, "removed-release")}) {
+		t.Fatal("env-only edit did not recover on the next reload")
+	}
+	// Removing the active repository cancels its jobs and releases its lock.
+	rerunCh <- tui.JobRequest{RunID: rerun.RunID, Repo: rerun.Repo, Name: rerun.Name, Branch: rerun.Branch, SHA: rerun.SHA}
+	waitJob("acme/api", 3, core.StatusRunning)
+	write("config.yml", "web: {repo: acme--web, env: web.env}\n")
+	waitReload(false)
+	waitJob("acme/api", 3, core.StatusCanceled)
+	select {
+	case <-worker.done:
+	default:
+		t.Fatal("removed worker is still running")
+	}
+	lock, err = lockRepoWorker("acme/api")
+	if err != nil {
+		t.Fatalf("removed worker leaked its lock: %v", err)
+	}
+	_ = lock.Close()
+	stop()
+	<-routerDone
+	if len(workers) != 1 || workers["acme/web"] == nil {
+		t.Fatal("worker registry does not match the latest valid config")
+	}
 }

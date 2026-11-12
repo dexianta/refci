@@ -238,9 +238,9 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 				return m, nil, true
 			}
 			job := m.jobs[m.selected]
-			if job.Status != core.StatusFailed && job.Status != core.StatusCanceled {
+			if job.Status != core.StatusFinished && job.Status != core.StatusFailed && job.Status != core.StatusCanceled {
 				m.statusInErr = true
-				m.statusMsg = "select a failed/canceled job to restart"
+				m.statusMsg = "select a finished/failed/canceled job to restart"
 				return m, nil, true
 			}
 			return m, requestRerunCmd(m.rerunCh, JobRequest{

@@ -132,7 +132,15 @@ restart/cancel actions use the selected repository's worker and env. Repositorie
 outside the config remain visible, but cannot be restarted or canceled there.
 Ctrl+C or SIGTERM stops every worker and its running jobs.
 
-Config and env files are read at startup; restart refci after editing them.
+When launched with a YAML config, refci rereads it and its env files every 3
+seconds, independently of `-interval`. Valid changes add or remove repository
+workers and update the environment for future jobs without restarting existing
+workers. Running jobs keep their environment; removing a repository stops its
+worker and cancels its running jobs. Invalid configuration, unreadable config/env
+files, or worker startup failures keep the entire previous configuration active,
+show an error in the TUI, and retry on the next reload. The initial configuration
+must be valid to start refci.
+Single-repo `refci -e <env> <repo>` still reads its env file only at startup.
 If `refci --help` does not list `config.yml`, update your installation first.
 
 Disable automatic fetch/poll (manual `R`/`C` in TUI still works, and no `.env` is required):
@@ -221,7 +229,7 @@ Jobs view:
 - `LEFT/RIGHT` or `PGUP/PGDOWN`: change page
 - `ENTER`: open log detail (stream the last 200 line of the file each second)
 - `L`: open CI activity log detail for the current repo, or the selected job's repo in the all-repositories view
-- `R`: rerun a failed/canceled job (worker processes only)
+- `R`: rerun a finished/failed/canceled job at its original commit, using the current job definition and worker environment (worker processes only)
 - `C`: cancel selected running/pending job
 - `ESC` or `P` (job list): open the repo picker when launched with `refci` or `refci config.yml`
 - `ESC` or `ENTER` (detail): back

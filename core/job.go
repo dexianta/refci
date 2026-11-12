@@ -34,9 +34,11 @@ type JobRunner struct {
 	cancelGrace      time.Duration
 	exitCleanupGrace time.Duration
 	logf             func(string, ...any)
+	env              func() []string
 
-	mu      sync.Mutex
-	running map[string]*runningJob
+	mu            sync.Mutex
+	running       map[string]*runningJob
+	automaticSHAs map[[3]string]string
 }
 
 // ErrJobNotRunning is returned by Cancel when this runner has no process for the job.
@@ -55,11 +57,35 @@ func NewJobRunner(dbRepo DbRepo) *JobRunner {
 		cancelGrace:      5 * time.Second,
 		exitCleanupGrace: 300 * time.Millisecond,
 		running:          map[string]*runningJob{},
+		automaticSHAs:    map[[3]string]string{},
 	}
 }
 
 func (j *JobRunner) SetLogger(logf func(string, ...any)) {
 	j.logf = logf
+}
+
+// SetEnv sets the environment source read just before each process starts.
+func (j *JobRunner) SetEnv(env func() []string) {
+	j.env = env
+}
+
+// LastAutomaticSHA keeps manual reruns from moving the poller's baseline.
+func (j *JobRunner) LastAutomaticSHA(repo, name, branch string) (string, error) {
+	j.mu.Lock()
+	sha, ok := j.automaticSHAs[[3]string{repo, name, branch}]
+	j.mu.Unlock()
+	if ok {
+		return sha, nil
+	}
+	job, err := j.dbRepo.LatestJobByNameBranch(repo, name, branch)
+	return job.SHA, err
+}
+
+func (j *JobRunner) rememberAutomaticSHA(repo, name, branch, sha string) {
+	j.mu.Lock()
+	j.automaticSHAs[[3]string{repo, name, branch}] = sha
+	j.mu.Unlock()
 }
 
 func (j *JobRunner) QueueJob(jobConf JobConf, envs []string, branch, sha string) error {
@@ -68,11 +94,19 @@ func (j *JobRunner) QueueJob(jobConf JobConf, envs []string, branch, sha string)
 		return fmt.Errorf("job name is required")
 	}
 
+	previous, err := j.LastAutomaticSHA(jobConf.Repo, name, branch)
+	if err != nil {
+		return err
+	}
+	if previous == sha {
+		return nil
+	}
 	latestJob, err := j.dbRepo.LatestJobByNameBranch(jobConf.Repo, name, branch)
 	if err != nil {
 		return err
 	}
 	if latestJob.SHA == sha {
+		j.rememberAutomaticSHA(jobConf.Repo, name, branch, sha)
 		return nil
 	}
 
@@ -91,7 +125,14 @@ func (j *JobRunner) QueueJob(jobConf JobConf, envs []string, branch, sha string)
 		}
 	}
 
-	return j.runJobAtSHA(jobConf, envs, branch, sha)
+	err = j.runJobAtSHA(jobConf, envs, branch, sha)
+	if err == nil {
+		j.rememberAutomaticSHA(jobConf.Repo, name, branch, sha)
+	} else if recorded, readErr := j.dbRepo.LatestJobByNameBranch(jobConf.Repo, name, branch); readErr == nil && recorded.SHA == sha {
+		// Preparation failures are recorded too, so they must not retry every tick.
+		j.rememberAutomaticSHA(jobConf.Repo, name, branch, sha)
+	}
+	return err
 }
 
 func (j *JobRunner) RerunJob(jobConf JobConf, envs []string, branch, sha string) error {
@@ -104,6 +145,11 @@ func (j *JobRunner) RerunJob(jobConf JobConf, envs []string, branch, sha string)
 		return fmt.Errorf("job sha is required")
 	}
 
+	previous, err := j.LastAutomaticSHA(jobConf.Repo, name, branch)
+	if err != nil {
+		return err
+	}
+	j.rememberAutomaticSHA(jobConf.Repo, name, branch, previous)
 	j.logEvent("rerun queued job=%s branch=%s sha=%s", name, branch, ShortSHA(sha))
 	return j.runJobAtSHA(jobConf, envs, branch, sha)
 }
@@ -169,6 +215,9 @@ func (r *JobRunner) Start(req RunJobRequest) (string, error) {
 	cmd.Dir = strings.TrimSpace(req.WorkDir)
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
+	if r.env != nil {
+		req.Env = r.env()
+	}
 	cmd.Env = append(os.Environ(), req.Env...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 

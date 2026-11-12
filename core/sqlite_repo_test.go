@@ -69,6 +69,53 @@ func TestSQLiteRepoAllowsMultipleRunsPerSHA(t *testing.T) {
 	}
 }
 
+type failNextCreateRepo struct {
+	DbRepo
+	fail bool
+}
+
+func (r *failNextCreateRepo) CreateJob(runID, repo, name, branch, sha, author string) error {
+	if r.fail {
+		r.fail = false
+		return errors.New("temporary database failure")
+	}
+	return r.DbRepo.CreateJob(runID, repo, name, branch, sha, author)
+}
+
+func TestJobRunnerRetriesUnrecordedFailures(t *testing.T) {
+	oldRoot := Root
+	Root = t.TempDir()
+	t.Cleanup(func() { Root = oldRoot })
+	repo, err := NewSQLiteRepo(openTestDB(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.CreateJob("previous", "acme/test", "build", "main", "old", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := repo.UpdateJob("previous", StatusFinished, "", ""); err != nil {
+		t.Fatal(err)
+	}
+	runner := NewJobRunner(&failNextCreateRepo{DbRepo: repo, fail: true})
+	conf := JobConf{Repo: "acme/test", Name: "build", ScriptPath: "missing.sh"}
+	for _, wantSHA := range []string{"old", "new"} {
+		// Both preparations fail, but only the second can record its failure.
+		if err := runner.QueueJob(conf, nil, "main", "new"); err == nil {
+			t.Fatal("missing mirror did not fail preparation")
+		}
+		if sha, err := runner.LastAutomaticSHA(conf.Repo, conf.Name, "main"); err != nil || sha != wantSHA {
+			t.Fatalf("automatic SHA = %q, %v; want %q", sha, err, wantSHA)
+		}
+	}
+	if err := runner.QueueJob(conf, nil, "main", "new"); err != nil {
+		t.Fatalf("recorded failure was retried: %v", err)
+	}
+	rows, err := repo.ListJob(JobFilter{Repo: conf.Repo})
+	if err != nil || len(rows) != 2 || rows[0].Status != StatusFailed {
+		t.Fatalf("recorded failures = %+v, %v", rows, err)
+	}
+}
+
 func TestCreateJobLogFileUsesFreshRunPath(t *testing.T) {
 	oldRoot := Root
 	Root = t.TempDir()
