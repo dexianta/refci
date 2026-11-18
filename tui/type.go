@@ -1,6 +1,9 @@
 package tui
 
-import "dexianta/refci/core"
+import (
+	"dexianta/refci/core"
+	"os"
+)
 
 type StatusEvent struct {
 	Message string
@@ -29,9 +32,13 @@ type loadRepoListMsg struct {
 }
 
 type loadJobLogMsg struct {
-	path  string
-	lines []string
-	err   error
+	path    string
+	data    []byte
+	info    os.FileInfo
+	size    int64
+	reset   bool
+	request int
+	err     error
 }
 
 type statusEventMsg struct {

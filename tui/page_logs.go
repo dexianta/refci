@@ -1,10 +1,8 @@
 package tui
 
 import (
-	"bytes"
 	"dexianta/refci/core"
 	"fmt"
-	"io"
 	"math"
 	"os"
 	"strings"
@@ -41,6 +39,22 @@ type logsModel struct {
 	mode    logsViewMode
 	logPath string
 	logRows []string
+	width   int
+	height  int
+
+	logOffset  int
+	logColumn  int
+	logFollow  bool
+	logSize    int64
+	logInfo    os.FileInfo
+	logLoading bool
+	logRequest int
+	logError   string
+	logQuery   string
+	logInput   string
+	searching  bool
+	logMatches []int
+	logMatch   int
 
 	statusMsg   string
 	statusInErr bool
@@ -80,17 +94,6 @@ func loadRepoJobsCmd(dbRepo core.DbRepo, repo string) tea.Cmd {
 			jobs:     jobs,
 			jobNames: jobNames,
 			err:      nil,
-		}
-	}
-}
-
-func loadJobLogCmd(path string) tea.Cmd {
-	return func() tea.Msg {
-		rows, err := readTail(path, 220)
-		return loadJobLogMsg{
-			path:  path,
-			lines: rows,
-			err:   err,
 		}
 	}
 }
@@ -164,16 +167,15 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 		return m, nil, true
 
 	case loadJobLogMsg:
-		if (m.mode != logsModeDetail && m.mode != logsModeCI) || mg.path != m.logPath {
+		if (m.mode != logsModeDetail && m.mode != logsModeCI) || mg.path != m.logPath || mg.request != m.logRequest {
 			return m, nil, true
 		}
+		m.logLoading = false
 		if mg.err != nil {
-			m.statusInErr = true
-			m.statusMsg = mg.err.Error()
-			m.logRows = nil
+			m.logError = mg.err.Error()
 			return m, nil, true
 		}
-		m.logRows = mg.lines
+		m.applyLogUpdate(mg)
 		return m, nil, true
 	case statusEventMsg:
 		m.statusInErr = mg.inErr
@@ -182,18 +184,14 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 
 	case tickMsg:
 		if (m.mode == logsModeDetail || m.mode == logsModeCI) && strings.TrimSpace(m.logPath) != "" {
-			return m, loadJobLogCmd(m.logPath), true
+			cmd := m.refreshLog()
+			return m, cmd, true
 		}
 		return m, loadRepoJobsCmd(m.dbRepo, m.repo), true
 
 	case tea.KeyMsg:
 		if m.mode == logsModeDetail || m.mode == logsModeCI {
-			switch mg.String() {
-			case "esc", "enter", "backspace":
-				m.mode = logsModeList
-				return m, nil, true
-			}
-			return m, nil, false
+			return m.updateLogKey(mg)
 		}
 
 		switch mg.String() {
@@ -217,10 +215,8 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 			if len(m.jobs) == 0 {
 				return m, nil, true
 			}
-			m.mode = logsModeDetail
-			m.logPath = m.jobs[m.selected].LogPath
-			m.logRows = nil
-			return m, loadJobLogCmd(m.logPath), true
+			cmd := m.openLog(logsModeDetail, m.jobs[m.selected].LogPath)
+			return m, cmd, true
 		case "l", "L":
 			repo := m.repo
 			if repo == "" {
@@ -229,10 +225,8 @@ func (m logsModel) Update(msg tea.Msg) (logsModel, tea.Cmd, bool) {
 				}
 				repo = m.jobs[m.selected].Repo
 			}
-			m.mode = logsModeCI
-			m.logPath = core.CIActivityLogPath(repo)
-			m.logRows = nil
-			return m, loadJobLogCmd(m.logPath), true
+			cmd := m.openLog(logsModeCI, core.CIActivityLogPath(repo))
+			return m, cmd, true
 		case "r":
 			if len(m.jobs) == 0 {
 				return m, nil, true
@@ -282,8 +276,13 @@ func (m logsModel) View() string {
 
 func (m logsModel) help() string {
 	if m.mode == logsModeDetail || m.mode == logsModeCI {
-		return footerBarStyle.Render(
-			renderHint("ESC/ENTER", "back"),
+		if m.searching {
+			return footerBarStyle.Width(max(1, m.width-footerBarStyle.GetHorizontalFrameSize())).Render(
+				"Type to search · Enter find · Esc cancel\nCtrl-U clear · Ctrl-C quit",
+			)
+		}
+		return footerBarStyle.Width(max(1, m.width-footerBarStyle.GetHorizontalFrameSize())).Render(
+			"↑/↓ scroll · Ctrl-U/D half page · PgUp/PgDn page\n/ search · n/N next/prev · G end/follow · Esc back",
 		)
 	}
 
@@ -501,29 +500,6 @@ func fixedCell(v string, width int) string {
 	return s
 }
 
-func (m logsModel) renderLogDetail() string {
-	title := "Job Log"
-	emptyText := "(empty)"
-	if m.mode == logsModeCI {
-		title = "CI Activity"
-		emptyText = "(no CI activity yet)"
-	}
-
-	header := sectionTitleStyle.Render(title)
-	meta := mutedStyle.Render(fmt.Sprintf("path=%s", m.logPath))
-
-	body := mutedStyle.Render(emptyText)
-	if len(m.logRows) > 0 {
-		body = strings.Join(m.logRows, "\n")
-	}
-	if m.statusMsg != "" && m.statusInErr {
-		body = errorStyle.Render(m.statusMsg) + "\n\n" + body
-	}
-
-	content := lipgloss.JoinVertical(lipgloss.Left, header, meta, "", body)
-	return regionFocusedStyle.Render(content)
-}
-
 func statusTag(v string) string {
 	switch strings.ToLower(v) {
 	case core.StatusFinished:
@@ -612,42 +588,6 @@ func compactDuration(d time.Duration) string {
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
-}
-
-// tailBytes bounds how much of a log file is read on each refresh.
-const tailBytes = 256 << 10
-
-func readTail(path string, maxRows int) ([]string, error) {
-	if path == "" {
-		return nil, nil
-	}
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-
-	info, err := f.Stat()
-	if err != nil {
-		return nil, err
-	}
-	offset := max(0, info.Size()-tailBytes)
-	b, err := io.ReadAll(io.NewSectionReader(f, offset, info.Size()-offset))
-	if err != nil {
-		return nil, err
-	}
-	if offset > 0 {
-		// drop the partial first line
-		if i := bytes.IndexByte(b, '\n'); i >= 0 {
-			b = b[i+1:]
-		}
-	}
-
-	rows := strings.Split(string(b), "\n")
-	if len(rows) > maxRows {
-		rows = rows[len(rows)-maxRows:]
-	}
-	return rows, nil
 }
 
 func renderRegion(title string, lines []string, helpText string, focused bool) string {

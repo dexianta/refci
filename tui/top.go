@@ -10,6 +10,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 type topModel struct {
@@ -116,6 +117,7 @@ func (m topModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		var handled bool
 		m.logsModel, cmd, handled = m.logsModel.Update(msg)
+		m.resizeLogs()
 		switch msg.String() {
 		case "esc", "p", "P":
 			if !handled && m.pickerEnabled {
@@ -131,6 +133,7 @@ func (m topModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.resizeLogs()
 		return m, nil
 	case tickMsg:
 		m.now = time.Time(msg)
@@ -168,6 +171,7 @@ func (m topModel) updateRepoPickerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.repo = repo
 		m.mode = topModeLogs
 		m.logsModel = newLogsModel(m.dbRepo, repo, m.rerunCh, m.cancelCh)
+		m.resizeLogs()
 		return m, m.logsModel.Init()
 	}
 	return m, nil
@@ -211,8 +215,7 @@ func (m topModel) View() string {
 		return "loading..."
 	}
 
-	subHeader := mutedStyle.Render(fmt.Sprintf("%s", m.now.Format("2006-01-02 15:04:05 Z07:00")))
-	header := lipgloss.JoinHorizontal(lipgloss.Top, headerStyle.Render("refci  -  zero-overhead CI"), " ", subHeader)
+	header := m.header()
 	if m.mode == topModeRepoPicker {
 		return appStyle.Render(strings.Join([]string{
 			header,
@@ -221,6 +224,10 @@ func (m topModel) View() string {
 			"\n\n\n\n\n",
 			lipgloss.JoinVertical(lipgloss.Top, m.repoPickerHelp(), "", globalFooter),
 		}, "\n"))
+	}
+
+	if m.logsModel.mode != logsModeList {
+		return m.logDetailView(m.logsModel.View())
 	}
 
 	body := m.logsModel.View()
@@ -238,6 +245,23 @@ func (m topModel) View() string {
 		"\n\n\n\n\n",
 		footer,
 	}, "\n"))
+}
+
+func (m topModel) header() string {
+	subHeader := mutedStyle.Render(m.now.Format("2006-01-02 15:04:05 Z07:00"))
+	return lipgloss.JoinHorizontal(lipgloss.Top, headerStyle.Render("refci  -  zero-overhead CI"), " ", subHeader)
+}
+
+func (m topModel) logDetailView(body string) string {
+	footer := lipgloss.JoinVertical(lipgloss.Top, m.logsModel.help(), "", globalFooter)
+	header := ansi.Truncate(m.header(), max(1, m.width-appStyle.GetHorizontalFrameSize()), "")
+	return appStyle.Render(strings.Join([]string{header, "", body, "", footer}, "\n"))
+}
+
+func (m *topModel) resizeLogs() {
+	m.logsModel.width = max(1, m.width-appStyle.GetHorizontalFrameSize())
+	m.logsModel.height = max(1, m.height-lipgloss.Height(m.logDetailView(""))+1)
+	m.logsModel.clampLogOffset()
 }
 
 func (m topModel) renderRepoPicker() string {

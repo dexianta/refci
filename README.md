@@ -227,13 +227,23 @@ Jobs view:
 - shows 20 jobs per page, including commit author
 - `UP/DOWN`: select job
 - `LEFT/RIGHT` or `PGUP/PGDOWN`: change page
-- `ENTER`: open log detail (stream the last 200 line of the file each second)
+- `ENTER`: open the full job log (refreshes each second)
 - `L`: open CI activity log detail for the current repo, or the selected job's repo in the all-repositories view
 - `R`: rerun a finished/failed/canceled job at its original commit, using the current job definition and worker environment (worker processes only)
 - `C`: cancel selected running/pending job
 - `ESC` or `P` (job list): open the repo picker when launched with `refci` or `refci config.yml`
 - `ESC` or `ENTER` (detail): back
 - `CTRL+C`: quit
+
+Inside a job log or CI activity log:
+
+- `UP/DOWN`: scroll one line; `CTRL+U/D`: scroll half a page
+- `PGUP/PGDOWN`: scroll a full page; `HOME` or `g`: jump to the beginning
+- `END` or `G`: jump to the end and follow new output; scrolling back pauses following
+- `LEFT/RIGHT`: scroll horizontally through long lines
+- `/`: type a case-insensitive, literal search and press `ENTER`; `n`/`N`: next/previous matching line, wrapping around the log
+- `ESC` while typing cancels the search; submit an empty search to clear it
+- `ESC` or `ENTER`: return to the job list
 
 ### 8) Troubleshoot GitHub authentication
 
