@@ -33,6 +33,7 @@ curl -fsSL https://raw.githubusercontent.com/dexianta/refci/main/install.sh | RE
 
 Rerun the installer to update an existing installation. Restart running refci
 processes to use the updated binary.
+The TUI header shows the installed version; `refci version` prints it in the terminal.
 
 ### 2) Initialize a root
 

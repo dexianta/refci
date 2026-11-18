@@ -249,7 +249,7 @@ func (m topModel) View() string {
 
 func (m topModel) header() string {
 	subHeader := mutedStyle.Render(m.now.Format("2006-01-02 15:04:05 Z07:00"))
-	return lipgloss.JoinHorizontal(lipgloss.Top, headerStyle.Render("refci  -  zero-overhead CI"), " ", subHeader)
+	return lipgloss.JoinHorizontal(lipgloss.Top, headerStyle.Render("refci v"+core.Version+"  -  zero-overhead CI"), " ", subHeader)
 }
 
 func (m topModel) logDetailView(body string) string {

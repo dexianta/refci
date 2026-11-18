@@ -26,8 +26,6 @@ type runtimeConfig struct {
 	MirrorPath string
 }
 
-const appVersion = "0.5.4"
-
 // - refci init (for init root)
 // - refci clone -i <ssh-key> <git-repo> (this download the code into repos folder)
 // - refci -e <env_path>  <repos/repo_name>  // to start running poll for this one repo
@@ -54,7 +52,7 @@ func run(args []string) error {
 	case "clone":
 		return runClone(args[1:])
 	case "version":
-		fmt.Println(appVersion)
+		fmt.Println(core.Version)
 		return nil
 	}
 
@@ -739,7 +737,7 @@ func isHelpArg(v string) bool {
 }
 
 func printMainUsage(w io.Writer) {
-	fmt.Fprintf(w, "refci v%s - local CI runner\n", appVersion)
+	fmt.Fprintf(w, "refci v%s - local CI runner\n", core.Version)
 	fmt.Fprintln(w, "")
 	fmt.Fprintln(w, "Usage:")
 	fmt.Fprintln(w, "  refci")
